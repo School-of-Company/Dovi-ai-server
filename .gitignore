@@ -1,2 +1,17 @@
 .env
 uv.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# pytest
+.pytest_cache/
