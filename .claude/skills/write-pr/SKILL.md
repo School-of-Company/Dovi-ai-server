@@ -62,7 +62,7 @@ cat > /tmp/pr_body.md << 'BODY'
 - Close #
 BODY
 
-gh pr create --title "<선택한 제목>" --body-file /tmp/pr_body.md
+gh pr create --title "<선택한 제목>" --body-file /tmp/pr_body.md --assignee @me
 ```
 
 ## Rules
