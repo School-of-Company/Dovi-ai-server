@@ -41,21 +41,22 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
    uv run ruff check .
    ```
 
-6. Push the branch so the commit is reachable on GitHub before posting reply links:
+6. Commit and push — this is part of the skill, not a separate step:
    ```bash
-   git rev-parse --abbrev-ref HEAD   # confirm branch name
+   git add <changed files>
+   git commit -m "fix :: PR 리뷰 반영 - <요약>"
    git push origin <branch-name>
    ```
 
 7. Reply to each comment on GitHub:
 
-   - **Applied**:
-     ```bash
-     HASH=$(git rev-parse --short HEAD)
-     FULL=$(git rev-parse HEAD)
-     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-     # body: "[${HASH}](https://github.com/${REPO}/commit/${FULL})에서 반영했습니다."
-     ```
+   ```bash
+   HASH=$(git rev-parse --short HEAD)
+   FULL=$(git rev-parse HEAD)
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   ```
+
+   - **Applied**: `[${HASH}](https://github.com/${REPO}/commit/${FULL})에서 반영했습니다.`
    - **Already Resolved**: `현재 코드에 이미 반영되어 있습니다. (<evidence>)`
    - **Explained**: `의도한 구현입니다. <reason>`
    - **Declined / Out of Scope**: `<reason> 이유로 반영하지 않겠습니다.`
@@ -90,5 +91,6 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
 - Do not blindly apply every review comment.
 - Always inspect the current code before changing it.
 - Do not make unrelated refactors while resolving comments.
+- Commit and push are part of this skill's workflow — do not wait for explicit commit request.
 - If a valid comment requires changes too large for this PR, propose a follow-up issue instead of expanding scope.
 - If the same review pattern recurs, update `.claude/rules/` or `.claude/skills/` to prevent it.
