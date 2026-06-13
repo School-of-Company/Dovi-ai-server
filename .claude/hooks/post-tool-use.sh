@@ -3,7 +3,7 @@
 
 INPUT=$(cat)
 
-PARSED=$(echo "$INPUT" | python3 -c "
+PARSED=$(printf '%s\n' "$INPUT" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)

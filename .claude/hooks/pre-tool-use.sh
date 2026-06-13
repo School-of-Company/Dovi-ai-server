@@ -8,7 +8,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
-PARSED=$(echo "$INPUT" | python3 -c "
+PARSED=$(printf '%s\n' "$INPUT" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -27,11 +27,11 @@ if [ "$TOOL_NAME" != "Bash" ]; then
 fi
 
 # Block dangerous commands
-if echo "$COMMAND" | grep -qE 'git\s+push\s+.*--force|git\s+push\s+-f(\s|$)'; then
+if echo "$COMMAND" | grep -qE 'git\s+push\s+.*(--force|-f(\s|$))'; then
   echo "BLOCKED: 'git push --force' is not allowed."
   exit 2
 fi
-if echo "$COMMAND" | grep -qE 'git\s+reset\s+--hard'; then
+if echo "$COMMAND" | grep -qE 'git\s+reset\s+.*--hard'; then
   echo "BLOCKED: 'git reset --hard' is not allowed."
   exit 2
 fi
@@ -39,7 +39,7 @@ if echo "$COMMAND" | grep -qE 'git\s+clean\s+.*-f'; then
   echo "BLOCKED: 'git clean -f' is not allowed."
   exit 2
 fi
-if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s|--recursive\s)'; then
+if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\s|--recursive\s)'; then
   echo "BLOCKED: 'rm -r*' is not allowed."
   exit 2
 fi

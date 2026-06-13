@@ -35,12 +35,14 @@
       "Bash(docker compose build*)"
     ],
     "deny": [
-      "Bash(git push --force*)",
-      "Bash(git push -f*)",
-      "Bash(git reset --hard*)",
-      "Bash(git clean -f*)",
-      "Bash(rm -rf*)",
-      "Bash(docker compose down -v*)",
+      "Bash(git push*--force*)",
+      "Bash(git push*-f *)",
+      "Bash(git push*-f)",
+      "Bash(git reset*--hard*)",
+      "Bash(git clean*-f*)",
+      "Bash(rm*-r*)",
+      "Bash(rm*--recursive*)",
+      "Bash(docker compose down*-v*)",
       "Bash(docker volume rm*)",
       "Bash(docker volume prune*)"
     ]
