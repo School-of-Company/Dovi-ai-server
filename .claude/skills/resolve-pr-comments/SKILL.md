@@ -8,22 +8,30 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
 
 ## Inputs
 
-- PR number
+- PR number (optional — auto-detected from current branch if not provided)
 - Current branch diff
 - Referenced files and surrounding code
 
 ## Steps
 
-1. Fetch PR comments:
+1. Resolve PR number:
+   - If a number was passed as an argument (e.g., `/resolve-pr-comments 3`), use it.
+   - Otherwise, detect from the current branch:
+     ```bash
+     gh pr view --json number -q .number
+     ```
+   - If no PR is found, stop and ask the user.
+
+2. Fetch PR comments:
    ```bash
    gh pr view <number> --comments
    gh api repos/{owner}/{repo}/pulls/<number>/comments
    gh api repos/{owner}/{repo}/issues/<number>/comments
    ```
 
-2. For each comment, read the referenced file and surrounding code.
+3. For each comment, read the referenced file and surrounding code.
 
-3. Classify each comment:
+4. Classify each comment:
 
    | Class | Meaning |
    |-------|---------|
@@ -33,22 +41,22 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
    | **Out of Scope** | Unrelated to this PR — handle separately |
    | **Invalid** | Based on a misunderstanding or incorrect assumption |
 
-4. Apply only `Valid` comments. Keep changes minimal and directly tied to the comment.
+5. Apply only `Valid` comments. Keep changes minimal and directly tied to the comment.
 
-5. Validate:
+6. Validate:
    ```bash
    uv run pytest
    uv run ruff check .
    ```
 
-6. Commit and push — this is part of the skill, not a separate step:
+7. Commit and push — this is part of the skill, not a separate step:
    ```bash
    git add <changed files>
    git commit -m "fix :: PR 리뷰 반영 - <요약>"
    git push origin <branch-name>
    ```
 
-7. Reply to each comment on GitHub:
+8. Reply to each comment on GitHub:
 
    ```bash
    HASH=$(git rev-parse --short HEAD)
@@ -68,7 +76,7 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
      -f body="<reply>"
    ```
 
-8. Summarize:
+9. Summarize:
 
    ```
    ## PR Review Comment Resolution
