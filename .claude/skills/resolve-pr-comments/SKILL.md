@@ -17,8 +17,8 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
 1. Fetch PR comments:
    ```bash
    gh pr view <number> --comments
-   gh api repos/:owner/:repo/pulls/<number>/comments
-   gh api repos/:owner/:repo/issues/<number>/comments
+   gh api repos/{owner}/{repo}/pulls/<number>/comments
+   gh api repos/{owner}/{repo}/issues/<number>/comments
    ```
 
 2. For each comment, read the referenced file and surrounding code.
@@ -62,7 +62,7 @@ Do not use this skill for local self-review before creating a PR (use `review-lo
 
    Post each reply:
    ```bash
-   gh api repos/:owner/:repo/pulls/<pr-number>/comments/<comment-id>/replies \
+   gh api repos/{owner}/{repo}/pulls/<pr-number>/comments/<comment-id>/replies \
      --method POST \
      -f body="<reply>"
    ```

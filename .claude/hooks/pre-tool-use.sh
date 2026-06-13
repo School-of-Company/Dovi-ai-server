@@ -22,32 +22,39 @@ if [ "$TOOL_NAME" != "Bash" ]; then
 fi
 
 # Block dangerous commands
-BLOCKED_PATTERNS=(
-  "git push --force"
-  "git push -f "
-  "git reset --hard"
-  "git clean -f"
-  "rm -rf"
-  "docker compose down -v"
-  "docker volume rm"
-  "docker volume prune"
-)
-
-for pattern in "${BLOCKED_PATTERNS[@]}"; do
-  if echo "$COMMAND" | grep -qF "$pattern"; then
-    echo "BLOCKED: '$pattern' is not allowed."
-    exit 2
-  fi
-done
+if echo "$COMMAND" | grep -qE 'git\s+push\s+.*--force|git\s+push\s+-f(\s|$)'; then
+  echo "BLOCKED: 'git push --force' is not allowed."
+  exit 2
+fi
+if echo "$COMMAND" | grep -qE 'git\s+reset\s+--hard'; then
+  echo "BLOCKED: 'git reset --hard' is not allowed."
+  exit 2
+fi
+if echo "$COMMAND" | grep -qE 'git\s+clean\s+.*-f'; then
+  echo "BLOCKED: 'git clean -f' is not allowed."
+  exit 2
+fi
+if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s|--recursive\s)'; then
+  echo "BLOCKED: 'rm -r*' is not allowed."
+  exit 2
+fi
+if echo "$COMMAND" | grep -qE 'docker\s+compose\s+down\s+.*-v'; then
+  echo "BLOCKED: 'docker compose down -v' is not allowed."
+  exit 2
+fi
+if echo "$COMMAND" | grep -qE 'docker\s+volume\s+(rm|prune)'; then
+  echo "BLOCKED: 'docker volume rm/prune' is not allowed."
+  exit 2
+fi
 
 # Block direct reading of .env files
-if echo "$COMMAND" | grep -qE '(cat|head|tail|less|more)\s+[^ ]*\.env([. ]|$)'; then
+if echo "$COMMAND" | grep -qE '(cat|head|tail|less|more|grep|awk|sed|cp|python[0-9.]?)\s+[^ ]*\.env([. ]|$)'; then
   echo "BLOCKED: Reading .env files directly is not allowed."
   exit 2
 fi
 
 # Block reading secrets or private keys
-if echo "$COMMAND" | grep -qE '(cat|head|tail|less|more|open)\s+[^ ]*(secrets/|private[_.-]key|\.pem|\.p8)'; then
+if echo "$COMMAND" | grep -qE '(cat|head|tail|less|more|open|grep|awk|sed)\s+[^ ]*(secrets/|private[_.-]key|\.pem|\.p8)'; then
   echo "BLOCKED: Reading secrets or private key files is not allowed."
   exit 2
 fi

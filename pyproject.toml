@@ -46,5 +46,5 @@ select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
 python_version = "3.13"
-strict = false
+strict = true
 ignore_missing_imports = true
