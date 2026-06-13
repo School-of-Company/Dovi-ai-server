@@ -5,16 +5,23 @@
 1. `git log main..HEAD --oneline` — list commits.
 2. `git diff main...HEAD --stat` — changed file stats.
 3. `git diff main...HEAD` — full diff.
-4. Draft PR title and body.
-5. Run `gh pr create` to create the PR.
+4. Propose 3 Korean PR title candidates and ask the user to pick one.
+5. Wait for the user to select a title.
+6. Write the PR body to `/tmp/pr_body.md`.
+7. Run `gh pr create` with `--body-file /tmp/pr_body.md`.
 
 ## PR Title Format
 
-- `<type>: <description>`
-- `<type>: <description> (#123)` — when there is an issue number
+- Korean only. No type prefix (`feat:`, `chore:`, etc.).
+- Concise, present-tense description of what this PR does.
+- Max 50 characters.
 
-type: feat, fix, chore, refactor, test, docs
-Max 70 characters. Use present-tense verb in description.
+Example candidates:
+```
+1. FastAPI 환경 초기화 및 Claude Code 하네스 구축
+2. 개발 환경 세팅 및 코드 리뷰 자동화 하네스 추가
+3. FastAPI 기본 구조와 Claude Code 운영 설정 추가
+```
 
 ## PR Body Format
 
@@ -27,10 +34,10 @@ Fill in the sections from `.github/PULL_REQUEST_TEMPLATE.md`:
 
 ## Creating the PR
 
-Run `gh pr create` as part of the skill execution:
+Write body to a temp file, then create the PR:
 
 ```bash
-gh pr create --title "<type>: <description>" --body "$(cat <<'EOF'
+cat > /tmp/pr_body.md << 'BODY'
 ## ✨ 작업 내용
 > ...
 
@@ -53,12 +60,15 @@ gh pr create --title "<type>: <description>" --body "$(cat <<'EOF'
 
 ## 📎 관련 이슈(선택)
 - Close #
-EOF
-)"
+BODY
+
+gh pr create --title "<선택한 제목>" --body-file /tmp/pr_body.md
 ```
 
 ## Rules
 
 - Do not include anything not in the diff.
 - Only check items you have actually verified.
+- Always propose 3 title candidates and wait for user selection before creating the PR.
 - Branch must be pushed before running `gh pr create`.
+- Always use `--body-file` (never inline heredoc) to avoid hook parse errors.
