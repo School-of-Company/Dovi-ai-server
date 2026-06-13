@@ -3,6 +3,11 @@
 
 INPUT=$(cat)
 
+if ! command -v python3 >/dev/null 2>&1; then
+  >&2 echo "[hook] WARNING: python3 not found, skipping pre-tool-use checks."
+  exit 0
+fi
+
 PARSED=$(echo "$INPUT" | python3 -c "
 import sys, json
 try:
