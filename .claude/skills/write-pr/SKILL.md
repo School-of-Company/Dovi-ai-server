@@ -6,7 +6,7 @@
    ```bash
    git fetch origin main
    git rebase origin/main
-   git push origin <current-branch> --force-with-lease
+   git push origin HEAD --force-with-lease
    ```
 2. `git log origin/main..HEAD --oneline` — list commits.
 3. `git diff origin/main...HEAD --stat` — changed file stats.
