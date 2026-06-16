@@ -2,12 +2,7 @@
 
 ## Steps
 
-1. Sync with main:
-   ```bash
-   git fetch origin main
-   git merge origin/main
-   git push origin HEAD
-   ```
+1. `git fetch origin main` — update local tracking branch.
 2. `git log origin/main..HEAD --oneline` — list commits.
 3. `git diff origin/main...HEAD --stat` — changed file stats.
 4. `git diff origin/main...HEAD` — full diff.
@@ -76,6 +71,5 @@ gh pr create --title "<선택한 제목>" --body-file /tmp/pr_body.md --assignee
 - Do not include anything not in the diff.
 - Only check items you have actually verified.
 - Always propose 3 title candidates and wait for user selection before creating the PR.
-- Always merge `origin/main` before creating the PR (merge preserves history and avoids force push).
 - Branch must be pushed before running `gh pr create`.
 - Always use `--body-file` (never inline heredoc) to avoid hook parse errors.
