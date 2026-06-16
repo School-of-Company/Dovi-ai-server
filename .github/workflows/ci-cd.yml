@@ -42,7 +42,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/school-of-company/dovi-ai-server:latest
+          tags: |
+            ghcr.io/school-of-company/dovi-ai-server:latest
+            ghcr.io/school-of-company/dovi-ai-server:${{ github.sha }}
 
   deploy:
     needs: build-push
@@ -53,12 +55,13 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_ACTOR: ${{ github.actor }}
+          IMAGE_TAG: ${{ github.sha }}
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: GHCR_TOKEN,GHCR_ACTOR
+          envs: GHCR_TOKEN,GHCR_ACTOR,IMAGE_TAG
           script: |
             if [ ! -d ~/Dovi-ai-server ]; then
               git clone https://github.com/School-of-Company/Dovi-ai-server.git ~/Dovi-ai-server
@@ -66,5 +69,5 @@ jobs:
             cd ~/Dovi-ai-server
             git pull origin main
             printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
-            docker compose pull
-            docker compose up -d
+            docker compose -f docker-compose.yml pull
+            docker compose -f docker-compose.yml up -d
