@@ -13,7 +13,10 @@ Do not auto-commit after completing work.
    - `.env`, `.env.*`
    - `.claude/.logs/`
    - `*.pem`, `*.p8`, `private-key.*`
-4. Block if on a protected branch (`main`).
+4. If on `main`: stop, use the `new-branch` skill first, then return here.
+5. Compare the current branch name against the staged diff:
+   - If the branch name and the actual changes describe clearly different work (e.g., branch is `feat/webhook` but diff is a hotfix for a config bug), stop and use the `new-branch` skill to create an appropriate branch first.
+   - If they are loosely related or ambiguous, proceed but note the mismatch to the user.
 
 ## Staging
 
