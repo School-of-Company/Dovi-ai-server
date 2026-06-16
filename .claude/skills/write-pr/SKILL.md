@@ -2,13 +2,14 @@
 
 ## Steps
 
-1. `git log origin/main..HEAD --oneline` — list commits.
-2. `git diff origin/main...HEAD --stat` — changed file stats.
-3. `git diff origin/main...HEAD` — full diff.
-4. Propose 3 Korean PR title candidates and ask the user to pick one.
-5. Wait for the user to select a title.
-6. Write the PR body to `/tmp/pr_body.md`.
-7. Run `gh pr create` with `--body-file /tmp/pr_body.md`.
+1. `git fetch origin main` — update local tracking branch.
+2. `git log origin/main..HEAD --oneline` — list commits.
+3. `git diff origin/main...HEAD --stat` — changed file stats.
+4. `git diff origin/main...HEAD` — full diff.
+5. Propose 3 Korean PR title candidates and ask the user to pick one.
+6. Wait for the user to select a title.
+7. Write the PR body to `/tmp/pr_body.md`.
+8. Run `gh pr create` with `--body-file /tmp/pr_body.md`.
 
 ## PR Title Format
 
