@@ -16,7 +16,7 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync
+      - run: uv sync --frozen
 
       - run: uv run pytest
 
