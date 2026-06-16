@@ -2,13 +2,19 @@
 
 ## Steps
 
-1. `git log main..HEAD --oneline` — list commits.
-2. `git diff main...HEAD --stat` — changed file stats.
-3. `git diff main...HEAD` — full diff.
-4. Propose 3 Korean PR title candidates and ask the user to pick one.
-5. Wait for the user to select a title.
-6. Write the PR body to `/tmp/pr_body.md`.
-7. Run `gh pr create` with `--body-file /tmp/pr_body.md`.
+1. Sync with main:
+   ```bash
+   git fetch origin main
+   git merge origin/main
+   git push origin HEAD
+   ```
+2. `git log origin/main..HEAD --oneline` — list commits.
+3. `git diff origin/main...HEAD --stat` — changed file stats.
+4. `git diff origin/main...HEAD` — full diff.
+5. Propose 3 Korean PR title candidates and ask the user to pick one.
+6. Wait for the user to select a title.
+7. Write the PR body to `/tmp/pr_body.md`.
+8. Run `gh pr create` with `--body-file /tmp/pr_body.md`.
 
 ## PR Title Format
 
@@ -70,5 +76,6 @@ gh pr create --title "<선택한 제목>" --body-file /tmp/pr_body.md --assignee
 - Do not include anything not in the diff.
 - Only check items you have actually verified.
 - Always propose 3 title candidates and wait for user selection before creating the PR.
+- Always merge `origin/main` before creating the PR (merge preserves history and avoids force push).
 - Branch must be pushed before running `gh pr create`.
 - Always use `--body-file` (never inline heredoc) to avoid hook parse errors.
