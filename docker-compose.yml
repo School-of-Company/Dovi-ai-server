@@ -1,5 +1,6 @@
 services:
   api:
+    image: ghcr.io/school-of-company/dovi-ai-server:latest
     build: .
     ports:
       - "8000:8000"

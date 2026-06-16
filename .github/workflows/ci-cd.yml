@@ -22,21 +22,49 @@ jobs:
 
       - run: uv run ruff check .
 
-  deploy:
+  build-push:
     needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/school-of-company/dovi-ai-server:latest
+
+  deploy:
+    needs: build-push
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.SSH_HOST }}
           port: ${{ secrets.SSH_PORT }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GHCR_TOKEN,GHCR_ACTOR
           script: |
             if [ ! -d ~/Dovi-ai-server ]; then
               git clone https://github.com/School-of-Company/Dovi-ai-server.git ~/Dovi-ai-server
             fi
             cd ~/Dovi-ai-server
             git pull origin main
-            docker compose up -d --build
+            printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+            docker compose pull
+            docker compose up -d
