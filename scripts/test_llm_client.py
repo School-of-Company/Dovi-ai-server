@@ -39,7 +39,11 @@ def test_completion(base_url: str, model: str) -> bool:
         r = httpx.post(f"{base_url}/chat/completions", json=payload, timeout=60)
         r.raise_for_status()
         result = r.json()
-        content = result["choices"][0]["message"]["content"]
+        choices = result.get("choices", [])
+        if not choices:
+            print("[FAIL] 응답에 'choices' 결과가 없습니다.")
+            return False
+        content = choices[0].get("message", {}).get("content", "")
         print(f"[OK] chat/completions → {content[:120]}")
         return True
     except httpx.ConnectError:
