@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 Severity = Literal["critical", "major", "minor", "suggestion"]
@@ -38,9 +38,9 @@ class ReviewRequestedEvent(CamelModel):
 
 class ReviewComment(CamelModel):
     severity: Severity
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
     file_path: str
-    line: int
+    line: int = Field(gt=0)
     title: str
     message: str
     evidence: list[str] = []

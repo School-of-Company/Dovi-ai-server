@@ -1,9 +1,11 @@
 import pytest
+from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import (
     ChangedFile,
+    ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
     ReviewModelOutput,
@@ -84,6 +86,39 @@ async def test_run_returns_failed_on_timeout() -> None:
 
 async def test_run_returns_failed_on_parse_error() -> None:
     fake = FakeLLM(error=ValueError("bad json"))
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewFailedEvent)
+    assert result.reason == "parse_error"
+
+
+async def test_run_skips_when_no_changed_files() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="unused"))
+    event = _event()
+    event.changed_files = []
+
+    result = await _pipeline(fake).run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.reviews == []
+    assert fake.received is None  # LLM 호출 안 됨
+
+
+async def test_run_returns_failed_on_validation_error() -> None:
+    try:
+        ReviewComment(
+            severity="critical",
+            confidence=2.0,
+            file_path="x",
+            line=1,
+            title="t",
+            message="m",
+        )
+    except ValidationError as exc:
+        validation_error = exc
+
+    fake = FakeLLM(error=validation_error)
 
     result = await _pipeline(fake).run(_event())
 

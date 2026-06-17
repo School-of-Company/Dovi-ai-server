@@ -1,8 +1,11 @@
 import logging
 
+from pydantic import ValidationError
+
 from app.llm.client import ChatMessage, LLMClient
 from app.review.schema import (
     FailureReason,
+    ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
     ReviewRequestedEvent,
@@ -30,24 +33,35 @@ class ReviewPipeline:
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
+        if not event.changed_files:
+            return self._completed(event, "No changed files to review.", [])
+
         messages = self._build_messages(event)
         try:
             output = await self._llm.generate(messages, max_tokens=self._max_tokens)
         except TimeoutError:
             return self._failed(event, "timeout")
-        except ValueError:
+        except (ValueError, ValidationError):
             return self._failed(event, "parse_error")
         except Exception:
             logger.exception("unexpected error during LLM generation")
             return self._failed(event, "server_error")
 
+        return self._completed(event, output.summary, output.reviews)
+
+    def _completed(
+        self,
+        event: ReviewRequestedEvent,
+        summary: str,
+        reviews: list[ReviewComment],
+    ) -> ReviewCompletedEvent:
         return ReviewCompletedEvent(
             review_job_id=event.review_job_id,
             repository_id=event.repository_id,
             pr_number=event.pr_number,
             head_sha=event.head_sha,
-            summary=output.summary,
-            reviews=output.reviews,
+            summary=summary,
+            reviews=reviews,
             model_version=self._model_version,
             prompt_version=self._prompt_version,
         )
