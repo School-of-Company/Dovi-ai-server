@@ -1,9 +1,14 @@
+import logging
+
 from app.llm.client import ChatMessage, LLMClient
 from app.review.schema import (
+    FailureReason,
     ReviewCompletedEvent,
     ReviewFailedEvent,
     ReviewRequestedEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = "You are a code review assistant. Review the diff and report real issues."
 
@@ -33,6 +38,7 @@ class ReviewPipeline:
         except ValueError:
             return self._failed(event, "parse_error")
         except Exception:
+            logger.exception("unexpected error during LLM generation")
             return self._failed(event, "server_error")
 
         return ReviewCompletedEvent(
@@ -47,12 +53,12 @@ class ReviewPipeline:
         )
 
     def _failed(
-        self, event: ReviewRequestedEvent, reason: str
+        self, event: ReviewRequestedEvent, reason: FailureReason
     ) -> ReviewFailedEvent:
         return ReviewFailedEvent(
             review_job_id=event.review_job_id,
             head_sha=event.head_sha,
-            reason=reason,  # type: ignore[arg-type]
+            reason=reason,
         )
 
     def _build_messages(self, event: ReviewRequestedEvent) -> list[ChatMessage]:

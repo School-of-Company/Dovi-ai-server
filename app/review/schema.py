@@ -21,7 +21,7 @@ class ContextFile(CamelModel):
 class ChangedFile(CamelModel):
     file_path: str
     status: FileStatus
-    patch: str
+    patch: str = ""
     content: str | None = None
     previous_content: str | None = None
 
