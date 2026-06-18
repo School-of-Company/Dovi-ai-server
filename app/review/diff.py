@@ -20,18 +20,18 @@ _BINARY_EXT = {
 
 _GENERATED_SUFFIXES = (".min.js", ".min.css", ".map", "_pb2.py", ".pb.go")
 
-_GENERATED_DIRS = (
-    "node_modules/",
-    "vendor/",
-    "dist/",
-    "build/",
-    "__pycache__/",
-    ".venv/",
-)
+_GENERATED_DIRS = {
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "__pycache__",
+    ".venv",
+}
 
 
 def _extension(name: str) -> str:
-    return "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
 
 def _should_skip(file: ChangedFile) -> bool:
@@ -49,7 +49,7 @@ def _should_skip(file: ChangedFile) -> bool:
         return True
     if path.endswith(_GENERATED_SUFFIXES):
         return True
-    if any(directory in path for directory in _GENERATED_DIRS):
+    if set(path.split("/")) & _GENERATED_DIRS:
         return True
     return False
 
@@ -74,11 +74,14 @@ def analyze(event: ReviewRequestedEvent) -> list[ReviewTarget]:
     for file in event.changed_files:
         if _should_skip(file):
             continue
+        hunks = _split_hunks(file.patch)
+        if not hunks:
+            continue
         targets.append(
             ReviewTarget(
                 file_path=file.file_path,
                 status=file.status,
-                hunks=_split_hunks(file.patch),
+                hunks=hunks,
             )
         )
     return targets

@@ -72,3 +72,17 @@ def test_filters_mixed_changeset() -> None:
     )
     targets = analyze(event)
     assert [t.file_path for t in targets] == ["app/main.py", "app/util.py"]
+
+
+def test_skips_binary_extension_uppercase() -> None:
+    event = _event(ChangedFile(file_path="assets/logo.PNG", status="added", patch=_PATCH))
+    assert analyze(event) == []
+
+
+def test_keeps_false_positive_directories() -> None:
+    event = _event(
+        ChangedFile(file_path="distributor/main.py", status="modified", patch=_PATCH),
+        ChangedFile(file_path="vendor_api/main.py", status="modified", patch=_PATCH),
+    )
+    targets = analyze(event)
+    assert len(targets) == 2
