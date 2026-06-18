@@ -3,12 +3,14 @@ import logging
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage, LLMClient
+from app.review.diff import analyze
 from app.review.schema import (
     FailureReason,
     ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
     ReviewRequestedEvent,
+    ReviewTarget,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,10 +35,11 @@ class ReviewPipeline:
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
-        if not event.changed_files:
-            return self._completed(event, "No changed files to review.", [])
+        targets = analyze(event)
+        if not targets:
+            return self._completed(event, "No reviewable changes found.", [])
 
-        messages = self._build_messages(event)
+        messages = self._build_messages(targets)
         try:
             output = await self._llm.generate(messages, max_tokens=self._max_tokens)
         except TimeoutError:
@@ -75,9 +78,9 @@ class ReviewPipeline:
             reason=reason,
         )
 
-    def _build_messages(self, event: ReviewRequestedEvent) -> list[ChatMessage]:
+    def _build_messages(self, targets: list[ReviewTarget]) -> list[ChatMessage]:
         diff = "\n\n".join(
-            f"# {f.file_path} ({f.status})\n{f.patch}" for f in event.changed_files
+            f"# {t.file_path} ({t.status})\n" + "\n".join(t.hunks) for t in targets
         )
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
