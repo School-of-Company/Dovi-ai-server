@@ -36,6 +36,12 @@ class ReviewRequestedEvent(CamelModel):
     changed_files: list[ChangedFile] = []
 
 
+class ReviewTarget(CamelModel):
+    file_path: str
+    status: FileStatus
+    hunks: list[str] = []
+
+
 class ReviewComment(CamelModel):
     severity: Severity
     confidence: float = Field(ge=0.0, le=1.0)
