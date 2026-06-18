@@ -1,3 +1,5 @@
+from pathlib import PurePosixPath
+
 from app.review.schema import ChangedFile, ReviewRequestedEvent, ReviewTarget
 
 _LOCKFILES = {
@@ -30,26 +32,21 @@ _GENERATED_DIRS = {
 }
 
 
-def _extension(name: str) -> str:
-    return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
-
-
 def _should_skip(file: ChangedFile) -> bool:
     if file.status == "removed":
         return True
     if not file.patch.strip():
         return True
 
-    path = file.file_path
-    name = path.rsplit("/", 1)[-1]
+    path = PurePosixPath(file.file_path)
 
-    if name in _LOCKFILES:
+    if path.name in _LOCKFILES:
         return True
-    if _extension(name) in _BINARY_EXT:
+    if path.suffix.lower() in _BINARY_EXT:
         return True
-    if path.endswith(_GENERATED_SUFFIXES):
+    if file.file_path.endswith(_GENERATED_SUFFIXES):
         return True
-    if set(path.split("/")) & _GENERATED_DIRS:
+    if set(path.parts) & _GENERATED_DIRS:
         return True
     return False
 
