@@ -35,12 +35,14 @@ def test_excludes_secret_paths() -> None:
         ContextFile(path="secrets/token.txt", content="token"),
         ContextFile(path="key.pem", content="-----BEGIN"),
         ContextFile(path="config/private_key.json", content="pk"),
+        ContextFile(path="analytics.keyboard.tsx", content="keyboard_content"),
         ContextFile(path="DOVI.md", content="dovi"),
     ]
     result = build_context(files)
     assert "SECRET" not in result
     assert "token" not in result
     assert "BEGIN" not in result
+    assert "keyboard_content" in result
     assert "# DOVI.md" in result
 
 
@@ -48,7 +50,7 @@ def test_truncates_large_file() -> None:
     files = [ContextFile(path="DOVI.md", content="x" * 10000)]
     result = build_context(files, max_file_chars=100)
     assert "...(truncated)" in result
-    assert result.count("x") == 100
+    assert result.count("x") == 100 - len("\n...(truncated)")
 
 
 def test_total_char_limit() -> None:
@@ -58,4 +60,5 @@ def test_total_char_limit() -> None:
     ]
     result = build_context(files, max_file_chars=5000, max_total_chars=6000)
     assert "# DOVI.md" in result
-    assert "# README.md" not in result
+    assert "# README.md" in result
+    assert "...(truncated)" in result

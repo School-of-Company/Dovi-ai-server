@@ -2,23 +2,25 @@ from pathlib import PurePosixPath
 
 from app.review.schema import ContextFile
 
-_SECRET_PATTERNS = (
-    ".env",
-    "secrets/",
-    ".pem",
-    ".p8",
-    "private-key",
-    "private_key",
-    ".key",
-)
+_SECRET_EXTENSIONS = {".env", ".pem", ".p8", ".key"}
+_SECRET_KEYWORDS = ("private-key", "private_key")
 
 _MAX_FILE_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
 
 
 def _is_secret(path: str) -> bool:
-    lowered = path.lower()
-    return any(pattern in lowered for pattern in _SECRET_PATTERNS)
+    pure = PurePosixPath(path.lower())
+    if "secrets" in pure.parts:
+        return True
+    if any(suffix in _SECRET_EXTENSIONS for suffix in pure.suffixes):
+        return True
+    name = pure.name
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if any(keyword in name for keyword in _SECRET_KEYWORDS):
+        return True
+    return False
 
 
 def _priority(path: str) -> int:
@@ -49,12 +51,20 @@ def build_context(
     blocks: list[str] = []
     total = 0
     for file in usable:
-        content = file.content[:max_file_chars]
-        if len(file.content) > max_file_chars:
-            content += "\n...(truncated)"
-        block = f"# {file.path}\n{content}"
-        if total + len(block) > max_total_chars:
+        header = f"# {file.path}\n"
+        remaining = max_total_chars - total - len(header)
+        if remaining <= 0:
             break
+
+        limit = min(max_file_chars, remaining)
+        if len(file.content) > limit:
+            trunc_msg = "\n...(truncated)"
+            content_limit = max(0, limit - len(trunc_msg))
+            content = file.content[:content_limit] + trunc_msg
+        else:
+            content = file.content
+
+        block = header + content
         blocks.append(block)
         total += len(block)
 
