@@ -30,7 +30,7 @@ def _priority(path: str) -> int:
         return 0
     if name in ("openapi.yaml", "openapi.yml", "swagger.json"):
         return 1
-    if name == "readme.md":
+    if lowered == "readme.md":
         return 2
     if lowered.startswith("docs/") or "/docs/" in lowered:
         return 3
@@ -59,7 +59,9 @@ def build_context(
         limit = min(max_file_chars, remaining)
         if len(file.content) > limit:
             trunc_msg = "\n...(truncated)"
-            content_limit = max(0, limit - len(trunc_msg))
+            if limit < len(trunc_msg):
+                break
+            content_limit = limit - len(trunc_msg)
             content = file.content[:content_limit] + trunc_msg
         else:
             content = file.content
