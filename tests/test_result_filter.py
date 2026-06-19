@@ -33,6 +33,12 @@ def test_drops_empty_evidence() -> None:
     assert [r.line for r in result] == [2]
 
 
+def test_drops_blank_evidence() -> None:
+    reviews = [_comment(evidence=["", "  "]), _comment(line=2, evidence=["real"])]
+    result = filter_reviews(reviews, require_evidence=True)
+    assert [r.line for r in result] == [2]
+
+
 def test_dedupes_same_location() -> None:
     reviews = [_comment(), _comment()]
     assert len(filter_reviews(reviews)) == 1
