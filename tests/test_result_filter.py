@@ -38,6 +38,16 @@ def test_dedupes_same_location() -> None:
     assert len(filter_reviews(reviews)) == 1
 
 
+def test_dedupes_same_location_keeps_highest_severity() -> None:
+    reviews = [
+        _comment(severity="minor", confidence=0.6),
+        _comment(severity="critical", confidence=0.9),
+    ]
+    result = filter_reviews(reviews)
+    assert len(result) == 1
+    assert result[0].severity == "critical"
+
+
 def test_sorts_by_severity_then_confidence() -> None:
     reviews = [
         _comment(severity="minor", line=1, title="a"),

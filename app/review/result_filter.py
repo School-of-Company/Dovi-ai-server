@@ -17,16 +17,19 @@ def filter_reviews(
         if r.confidence >= min_confidence and (not require_evidence or r.evidence)
     ]
 
+    # 정렬을 먼저 해서, 같은 위치 중복 중 가장 심각도·신뢰도 높은 리뷰가 남도록 한다
+    sorted_kept = sorted(
+        kept, key=lambda r: (_SEVERITY_ORDER[r.severity], -r.confidence)
+    )
+
     seen: set[tuple[str, int, str]] = set()
     deduped: list[ReviewComment] = []
-    for r in kept:
+    for r in sorted_kept:
         key = (r.file_path, r.line, r.title)
         if key in seen:
             continue
         seen.add(key)
         deduped.append(r)
-
-    deduped.sort(key=lambda r: (_SEVERITY_ORDER[r.severity], -r.confidence))
 
     per_file: dict[str, int] = {}
     result: list[ReviewComment] = []

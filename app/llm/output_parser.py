@@ -3,7 +3,7 @@ import re
 
 from app.review.schema import ReviewModelOutput
 
-_FENCE = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
+_FENCE = re.compile(r"```(?:json)?\s*(.+)\s*```", re.DOTALL)
 
 
 def parse_review_output(text: str) -> ReviewModelOutput:
