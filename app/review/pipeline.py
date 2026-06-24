@@ -5,6 +5,7 @@ from pydantic import ValidationError
 from app.llm.client import ChatMessage, LLMClient
 from app.review.context import build_context
 from app.review.diff import analyze
+from app.review.result_filter import filter_reviews
 from app.review.schema import (
     FailureReason,
     ReviewComment,
@@ -51,7 +52,8 @@ class ReviewPipeline:
             logger.exception("unexpected error during LLM generation")
             return self._failed(event, "server_error")
 
-        return self._completed(event, output.summary, output.reviews)
+        reviews = filter_reviews(output.reviews)
+        return self._completed(event, output.summary, reviews)
 
     def _completed(
         self,
