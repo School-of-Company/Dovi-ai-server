@@ -42,18 +42,27 @@ class ReviewPipeline:
             return self._completed(event, "No reviewable changes found.", [])
 
         messages = self._build_messages(event, targets)
-        try:
-            output = await self._llm.generate(messages, max_tokens=self._max_tokens)
-        except TimeoutError:
-            return self._failed(event, "timeout")
-        except (ValueError, ValidationError):
-            return self._failed(event, "parse_error")
-        except Exception:
-            logger.exception("unexpected error during LLM generation")
-            return self._failed(event, "server_error")
 
-        reviews = filter_reviews(output.reviews)
-        return self._completed(event, output.summary, reviews)
+        # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
+        # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
+        last_reason: FailureReason = "server_error"
+        for _ in range(2):
+            try:
+                output = await self._llm.generate(messages, max_tokens=self._max_tokens)
+            except TimeoutError:
+                return self._failed(event, "timeout")
+            except (ValueError, ValidationError):
+                last_reason = "parse_error"
+                continue
+            except Exception:
+                logger.exception("unexpected error during LLM generation")
+                last_reason = "server_error"
+                continue
+
+            reviews = filter_reviews(output.reviews)
+            return self._completed(event, output.summary, reviews)
+
+        return self._failed(event, last_reason)
 
     def _completed(
         self,

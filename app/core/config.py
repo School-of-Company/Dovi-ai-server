@@ -12,11 +12,12 @@ class Settings(BaseSettings):
     kafka_review_completed_topic: str = "pr.review.completed"
     kafka_review_failed_topic: str = "pr.review.failed"
 
-    llm_profile: str = "single_gpu_16gb"
+    llm_profile: str = "dual_gpu_32gb"
     llm_base_url: str = "http://localhost:8001/v1"
-    llm_model: str = "qwen2.5-coder-14b-instruct-q5_k_m.gguf"
+    llm_model: str = "qwen2.5-coder-32b-instruct-q4_k_m.gguf"
     llm_max_context: int = 8192
     llm_gpu_layers: int = -1
+    llm_timeout_seconds: float = 120.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
