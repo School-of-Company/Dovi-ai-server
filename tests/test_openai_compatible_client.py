@@ -88,6 +88,32 @@ async def test_generate_malformed_response_raises_value_error() -> None:
         await client.generate([{"role": "user", "content": "hi"}])
 
 
+async def test_generate_non_dict_body_raises_value_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    client = _client(handler)
+
+    with pytest.raises(ValueError):
+        await client.generate([{"role": "user", "content": "hi"}])
+
+
+async def test_generate_null_content_raises_value_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": None}}],
+                "usage": {"completion_tokens": 0},
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(ValueError):
+        await client.generate([{"role": "user", "content": "hi"}])
+
+
 async def test_generate_invalid_json_content_raises_value_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return _openai_response("not json")

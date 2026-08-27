@@ -50,8 +50,11 @@ class OpenAICompatibleLLMClient:
 
         try:
             content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
+        except (KeyError, IndexError, TypeError) as exc:
             raise ValueError(f"unexpected LLM response shape: {exc}") from exc
+
+        if not isinstance(content, str):
+            raise ValueError(f"LLM response content is not a string: {content!r}")
 
         return parse_review_output(content)
 
