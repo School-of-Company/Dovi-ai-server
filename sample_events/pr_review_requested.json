@@ -1,0 +1,21 @@
+{
+  "reviewJobId": "123456:42:8f3a1c2",
+  "repositoryId": 123456,
+  "prNumber": 42,
+  "headSha": "8f3a1c2",
+  "baseSha": "1a2b3c4",
+  "contextFiles": [
+    {
+      "path": "DOVI.md",
+      "content": "# DOVI Project Context\n\n## Project Overview\nDovi 결제 서비스의 결제 처리 모듈입니다.\n\n## Review Focus\n- 잔액/결제 정합성\n- 동시성 문제\n- 입력값 검증\n",
+      "source": "github"
+    }
+  ],
+  "changedFiles": [
+    {
+      "filePath": "app/service/payment.py",
+      "status": "modified",
+      "patch": "@@ -10,6 +10,9 @@ def charge(amount, user):\n-    if amount <= 0: raise ValueError\n+    if amount < 0: raise ValueError\n+    balance = get_balance(user)\n+    balance -= amount\n+    save_balance(user, balance)\n     process_payment(amount, user)\n"
+    }
+  ]
+}
