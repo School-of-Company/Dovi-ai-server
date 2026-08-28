@@ -28,11 +28,22 @@ def test_parses_json_with_nested_code_fence() -> None:
     nested_json = (
         '{"summary": "ok", "reviews": [{"severity": "major", "confidence": 0.9, '
         '"filePath": "a.py", "line": 1, "title": "t", "message": "m", '
+        '"evidence": ["e"], '
         '"suggestedFix": "```python\\nprint(\'hi\')\\n```"}]}'
     )
     text = f"```json\n{nested_json}\n```"
     result = parse_review_output(text)
     assert result.reviews[0].suggested_fix == "```python\nprint('hi')\n```"
+
+
+def test_empty_evidence_raises_validation_error() -> None:
+    text = (
+        '{"summary": "s", "reviews": [{"severity": "major", "confidence": 0.9, '
+        '"filePath": "a.py", "line": 1, "title": "t", "message": "m", '
+        '"evidence": []}]}'
+    )
+    with pytest.raises(ValidationError):
+        parse_review_output(text)
 
 
 def test_parses_review_with_comment() -> None:

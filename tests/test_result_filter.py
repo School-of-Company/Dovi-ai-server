@@ -28,7 +28,18 @@ def test_drops_low_confidence() -> None:
 
 
 def test_drops_empty_evidence() -> None:
-    reviews = [_comment(evidence=[]), _comment(line=2, evidence=["x"])]
+    # 스키마가 evidence min_length=1을 강제하므로, 빈 evidence는 정상 구성이 불가능하다.
+    # model_construct로 검증을 우회해 필터 자체의 방어 로직(defense in depth)을 확인한다.
+    empty_evidence = ReviewComment.model_construct(
+        severity="major",
+        confidence=0.9,
+        file_path="a.py",
+        line=1,
+        title="t",
+        message="m",
+        evidence=[],
+    )
+    reviews = [empty_evidence, _comment(line=2, evidence=["x"])]
     result = filter_reviews(reviews, require_evidence=True)
     assert [r.line for r in result] == [2]
 
