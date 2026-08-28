@@ -49,7 +49,7 @@ class ReviewComment(CamelModel):
     line: int = Field(gt=0)
     title: str
     message: str
-    evidence: list[str] = []
+    evidence: list[str] = Field(min_length=1)
     suggested_fix: str | None = None
 
 

@@ -17,7 +17,14 @@ from app.review.schema import (
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = "You are a code review assistant. Review the diff and report real issues."
+_SYSTEM_PROMPT = (
+    "You are a code review assistant. Review the diff and report only real, "
+    "concrete issues.\n\n"
+    "For every item in `reviews`, `evidence` must contain at least one string "
+    "quoting the exact diff line(s) that support the finding. Findings with "
+    "empty `evidence` are discarded before reaching the user, so never leave "
+    "it empty."
+)
 
 
 class ReviewPipeline:
