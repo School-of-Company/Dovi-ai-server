@@ -13,6 +13,7 @@ pr.review.requested를 소비해 파이프라인을 실행하고, 결과를 comp
 
 import argparse
 import asyncio
+import sys
 
 from app.core.config import get_settings
 from app.kafka.client import create_consumer, create_producer
@@ -69,6 +70,10 @@ async def _run(use_real: bool) -> None:
 
 
 def main() -> None:
+    # nohup 등으로 파일에 리다이렉트할 때 블록 버퍼링 때문에 로그가 늦게(또는 안) 보이는
+    # 문제를 막는다 — 오래 도는 데몬성 스크립트라 실시간 관찰이 중요하다.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--real", action="store_true", help="fake 대신 실제 LLM 서버 호출")
     args = parser.parse_args()

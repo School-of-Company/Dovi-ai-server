@@ -11,6 +11,7 @@ scripts.kafka_run_consumer가 발행한 결과를 눈으로 확인할 때 사용
 
 import asyncio
 import json
+import sys
 
 from aiokafka import AIOKafkaConsumer
 
@@ -44,6 +45,10 @@ async def _consume() -> None:
 
 
 def main() -> None:
+    # nohup 등으로 파일에 리다이렉트할 때 블록 버퍼링 때문에 로그가 늦게(또는 안) 보이는
+    # 문제를 막는다 — 오래 도는 데몬성 스크립트라 실시간 관찰이 중요하다.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+
     try:
         asyncio.run(_consume())
     except KeyboardInterrupt:
