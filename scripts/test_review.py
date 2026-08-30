@@ -16,36 +16,15 @@ import sys
 from pathlib import Path
 
 from app.core.config import get_settings
-from app.llm.client import ChatMessage, LLMClient
+from app.llm.client import LLMClient
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
 from app.review.pipeline import ReviewPipeline
-from app.review.schema import ReviewModelOutput, ReviewRequestedEvent
+from app.review.schema import ReviewRequestedEvent
+from scripts._fake_llm import FakeLLM
 
 _DEFAULT_EVENT_PATH = (
     Path(__file__).resolve().parent.parent / "sample_events" / "pr_review_requested.json"
 )
-
-
-class FakeLLM:
-    """네트워크 없이 파이프라인 흐름만 확인할 때 쓰는 고정 응답 LLM."""
-
-    async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
-    ) -> ReviewModelOutput:
-        return ReviewModelOutput(
-            summary="[FAKE] 잔액 검증 완화 및 과인출 가능성이 있습니다.",
-            reviews=[
-                {
-                    "severity": "major",
-                    "confidence": 0.9,
-                    "filePath": "app/service/payment.py",
-                    "line": 12,
-                    "title": "[FAKE] 잔액 부족 체크 누락",
-                    "message": "잔액 차감 전 충분한 잔액이 있는지 확인하지 않습니다.",
-                    "evidence": ["balance -= amount"],
-                }
-            ],
-        )
 
 
 def _load_event(path: Path) -> ReviewRequestedEvent:
