@@ -5,6 +5,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from app.kafka.producer import ReviewEventProducer
+from app.review.dedup import DedupStore
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import ReviewCompletedEvent, ReviewRequestedEvent
 
@@ -33,10 +34,12 @@ class ReviewRequestConsumer:
         source: MessageSource,
         pipeline: ReviewPipeline,
         producer: ReviewEventProducer,
+        dedup: DedupStore,
     ) -> None:
         self._source = source
         self._pipeline = pipeline
         self._producer = producer
+        self._dedup = dedup
 
     async def run(self) -> None:
         async for message in self._source:
@@ -50,9 +53,17 @@ class ReviewRequestConsumer:
             logger.exception("invalid ReviewRequestedEvent payload, skipping")
             return
 
+        if not await self._dedup.try_start(event.review_job_id):
+            logger.info(
+                "skipping duplicate or in-progress reviewJobId=%s", event.review_job_id
+            )
+            return
+
         result = await self._pipeline.run(event)
 
         if isinstance(result, ReviewCompletedEvent):
             await self._producer.publish_completed(result)
+            await self._dedup.mark_completed(event.review_job_id)
         else:
             await self._producer.publish_failed(result)
+            await self._dedup.mark_failed(event.review_job_id)

@@ -21,6 +21,7 @@ from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import ReviewEventProducer
 from app.llm.client import LLMClient
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
+from app.review.dedup import create_dedup_store, create_redis_client
 from app.review.pipeline import ReviewPipeline
 from scripts._fake_llm import FakeLLM
 
@@ -49,12 +50,19 @@ async def _run(use_real: bool) -> None:
     await kafka_producer.start()
     await kafka_consumer.start()
 
+    redis_client = create_redis_client(settings)
+    # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
+    # 완전히 일치하지 않지만, set/get/delete를 문자열 인자로만 호출하므로 런타임에는 호환된다.
+    dedup_store = create_dedup_store(settings, redis_client)  # type: ignore[arg-type]
+
     event_producer = ReviewEventProducer(
         kafka_producer,
         completed_topic=settings.kafka_review_completed_topic,
         failed_topic=settings.kafka_review_failed_topic,
     )
-    review_consumer = ReviewRequestConsumer(kafka_consumer, pipeline, event_producer)
+    review_consumer = ReviewRequestConsumer(
+        kafka_consumer, pipeline, event_producer, dedup_store
+    )
 
     print(f"컨슈머 시작: topic={settings.kafka_review_request_topic}")
     print(f"LLM: {'실제 (' + settings.llm_base_url + ')' if use_real else 'fake'}")
@@ -65,6 +73,7 @@ async def _run(use_real: bool) -> None:
     finally:
         await kafka_consumer.stop()
         await kafka_producer.stop()
+        await redis_client.aclose()
         if real_client is not None:
             await real_client.aclose()
 

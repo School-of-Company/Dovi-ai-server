@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     llm_gpu_layers: int = -1
     llm_timeout_seconds: float = 120.0
 
+    redis_url: str = "redis://localhost:6379"
+    # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)
+    review_dedup_ttl_seconds: int = 86400
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
