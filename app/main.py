@@ -11,6 +11,7 @@ from app.kafka.client import create_consumer, create_producer
 from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import ReviewEventProducer
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
+from app.review.dedup import create_dedup_store, create_redis_client
 from app.review.pipeline import ReviewPipeline
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await kafka_producer.start()
     await kafka_consumer.start()
 
+    redis_client = create_redis_client(settings)
+    # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
+    # 완전히 일치하지 않지만, set/get/delete를 문자열 인자로만 호출하므로 런타임에는 호환된다.
+    dedup_store = create_dedup_store(settings, redis_client)  # type: ignore[arg-type]
+
     event_producer = ReviewEventProducer(
         kafka_producer,
         completed_topic=settings.kafka_review_completed_topic,
         failed_topic=settings.kafka_review_failed_topic,
     )
-    review_consumer = ReviewRequestConsumer(kafka_consumer, pipeline, event_producer)
+    review_consumer = ReviewRequestConsumer(
+        kafka_consumer, pipeline, event_producer, dedup_store
+    )
     consumer_task = asyncio.create_task(_run_consumer_forever(review_consumer))
 
     try:
@@ -67,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pass
         await kafka_consumer.stop()
         await kafka_producer.stop()
+        await redis_client.aclose()
         await llm_client.aclose()
 
 
