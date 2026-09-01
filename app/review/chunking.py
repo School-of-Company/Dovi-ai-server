@@ -91,17 +91,25 @@ def _extract_name(node: Node) -> str | None:
     return None
 
 
-def _find_enclosing_boundary(root: Node, line: int, boundary_types: set[str]) -> Node | None:
-    """0-indexed line을 포함하는 boundary 타입 노드 중 가장 안쪽(가장 좁은) 것을 찾는다."""
-    best: Node | None = None
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if node.start_point[0] <= line <= node.end_point[0]:
-            if node.type in boundary_types:
-                best = node
-            stack.extend(node.children)
-    return best
+def _find_enclosing_boundary(
+    root: Node, encoded_lines: list[bytes], line: int, boundary_types: set[str]
+) -> Node | None:
+    """0-indexed line을 포함하는 boundary 타입 조상 노드를 찾는다.
+
+    node.descendant_for_point_range로 해당 라인의 leaf 노드를 바로 찾은 뒤
+    parent 체인만 타고 올라간다 — 트리 전체를 순회하지 않아 파일이 커져도 빠르다.
+    라인의 마지막 문자를 기준점으로 쓴다: 첫 컬럼(0)은 들여쓰기 공백이라 leaf가
+    없는 경우가 많아, 실제 토큰이 있는 라인 끝 쪽을 찾아야 정확히 걸린다.
+    """
+    if line >= len(encoded_lines):
+        return None
+    col = max(len(encoded_lines[line]) - 1, 0)
+    node: Node | None = root.descendant_for_point_range((line, col), (line, col))
+    while node is not None:
+        if node.type in boundary_types:
+            return node
+        node = node.parent
+    return None
 
 
 def extract_context_chunks(
@@ -120,19 +128,23 @@ def extract_context_chunks(
     if not changed_lines:
         return None
 
+    encoded = content.encode("utf-8")
     try:
         parser = _get_parser(language)
-        encoded = content.encode("utf-8")
         tree = parser.parse(encoded)
     except Exception:
+        # tree-sitter 바인딩이 무엇을 던질지 문서화가 부실해 구체적 예외로 좁히기
+        # 어렵다. 이 함수 전체가 "실패하면 기존 diff hunk 방식으로 안전하게
+        # fallback"하는 best-effort 보강 기능이라, 여기서 넓게 잡아 삼키는 게 맞다.
         return None
 
     boundary_types = _BOUNDARY_NODE_TYPES[language]
+    encoded_lines = encoded.split(b"\n")
     seen_ranges: set[tuple[int, int]] = set()
     chunks: list[AstChunk] = []
 
     for line in sorted(changed_lines):
-        node = _find_enclosing_boundary(tree.root_node, line - 1, boundary_types)
+        node = _find_enclosing_boundary(tree.root_node, encoded_lines, line - 1, boundary_types)
         if node is None:
             continue
 
