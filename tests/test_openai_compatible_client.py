@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -41,7 +42,7 @@ async def test_generate_returns_parsed_output() -> None:
 
 
 async def test_generate_sends_json_schema_response_format() -> None:
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)

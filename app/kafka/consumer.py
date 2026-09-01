@@ -5,7 +5,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from app.kafka.producer import ReviewEventProducer
+from app.kafka.producer import EventPublisher
 from app.review.dedup import DedupStore
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import ReviewCompletedEvent, ReviewRequestedEvent
@@ -34,7 +34,7 @@ class ReviewRequestConsumer:
         self,
         source: MessageSource,
         pipeline: ReviewPipeline,
-        producer: ReviewEventProducer,
+        producer: EventPublisher,
         dedup: DedupStore,
     ) -> None:
         self._source = source

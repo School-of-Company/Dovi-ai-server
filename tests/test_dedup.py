@@ -6,7 +6,7 @@ class FakeRedis:
         self._store: dict[str, str] = {}
 
     async def set(
-        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+        self, name: str, value: str, nx: bool = False, ex: int | None = None
     ) -> bool | None:
         if nx and name in self._store:
             return None

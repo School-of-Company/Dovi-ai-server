@@ -12,6 +12,15 @@ class MessageSender(Protocol):
     ) -> Any: ...
 
 
+class EventPublisher(Protocol):
+    """ReviewRequestConsumer가 필요로 하는 최소 인터페이스. ReviewEventProducer가
+    구조적으로 만족하며, 테스트에서는 fake로 대체할 수 있다."""
+
+    async def publish_completed(self, event: ReviewCompletedEvent) -> None: ...
+
+    async def publish_failed(self, event: ReviewFailedEvent) -> None: ...
+
+
 class ReviewEventProducer:
     """review 완료/실패 이벤트를 Kafka에 발행한다.
 

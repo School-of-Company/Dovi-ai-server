@@ -1,19 +1,26 @@
 from app.review.result_filter import filter_reviews, summarize_minor
-from app.review.schema import ReviewComment
+from app.review.schema import ReviewComment, Severity
 
 
-def _comment(**kwargs) -> ReviewComment:
-    base = {
-        "severity": "major",
-        "confidence": 0.9,
-        "file_path": "a.py",
-        "line": 1,
-        "title": "t",
-        "message": "m",
-        "evidence": ["e"],
-    }
-    base.update(kwargs)
-    return ReviewComment(**base)
+def _comment(
+    *,
+    severity: Severity = "major",
+    confidence: float = 0.9,
+    file_path: str = "a.py",
+    line: int = 1,
+    title: str = "t",
+    message: str = "m",
+    evidence: list[str] | None = None,
+) -> ReviewComment:
+    return ReviewComment(
+        severity=severity,
+        confidence=confidence,
+        file_path=file_path,
+        line=line,
+        title=title,
+        message=message,
+        evidence=evidence if evidence is not None else ["e"],
+    )
 
 
 def test_empty() -> None:
