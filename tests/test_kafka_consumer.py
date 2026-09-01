@@ -1,4 +1,7 @@
+import asyncio
 from collections.abc import AsyncIterator
+
+import pytest
 
 from app.kafka.consumer import ReviewRequestConsumer
 from app.llm.client import ChatMessage
@@ -45,6 +48,13 @@ class FailingLLM:
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
     ) -> ReviewModelOutput:
         raise RuntimeError("boom")
+
+
+class CancellingLLM:
+    async def generate(
+        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+    ) -> ReviewModelOutput:
+        raise asyncio.CancelledError()
 
 
 class FakeProducer:
@@ -158,6 +168,45 @@ async def test_handle_skips_duplicate_review_job_id() -> None:
     await consumer.handle(_event_bytes())  # 같은 reviewJobId 재전달
 
     assert len(producer.completed) == 1  # 두 번째는 skip
+
+
+async def test_handle_releases_dedup_lock_on_cancellation() -> None:
+    producer = FakeProducer()
+    dedup = FakeDedupStore()
+    pipeline = ReviewPipeline(CancellingLLM(), model_version="v", prompt_version="v1")
+    consumer = ReviewRequestConsumer(FakeSource([]), pipeline, producer, dedup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer.handle(_event_bytes())
+
+    # graceful shutdown 유예시간을 넘겨 강제 취소돼도 락은 풀려야 재전달된
+    # 메시지를 새 인스턴스가 TTL 만료를 기다리지 않고 재처리할 수 있다.
+    assert dedup.failed == ["42:7:sha"]
+    assert len(producer.completed) == 0
+    assert len(producer.failed) == 0
+
+
+async def test_run_stops_after_current_message_when_shutdown_requested() -> None:
+    producer = FakeProducer()
+    messages = [
+        FakeMessage(_event_bytes("1:1:a")),
+        FakeMessage(_event_bytes("2:2:b")),
+    ]
+    source = FakeSource(messages)
+    consumer = ReviewRequestConsumer(
+        source,
+        _pipeline(ReviewModelOutput(summary="ok", reviews=[])),
+        producer,
+        FakeDedupStore(),
+    )
+    shutdown = asyncio.Event()
+    shutdown.set()
+
+    await consumer.run(shutdown)
+
+    # shutdown이 이미 설정돼 있었으므로 첫 메시지만 마무리하고 커밋한 뒤 반환한다.
+    assert len(producer.completed) == 1
+    assert source.commit_count == 1
 
 
 async def test_run_processes_all_messages_and_commits_each() -> None:

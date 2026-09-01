@@ -51,6 +51,9 @@ async def test_lifespan_starts_and_cancels_consumer_when_enabled(
 ) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    # FakeConsumerSource는 메시지를 절대 내보내지 않아 shutdown 유예시간을
+    # 항상 소진하므로, 기본값(130s)이 아니라 짧은 값으로 테스트 속도를 보장한다.
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
 
     fake_producer = FakeStartStop()
     fake_consumer = FakeConsumerSource()

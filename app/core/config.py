@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # 기본 False: 테스트/CI에서 TestClient가 앱을 기동해도 실제 Kafka/LLM에
     # 연결을 시도하지 않는다. 운영 배포 시 .env에서 명시적으로 true로 켠다.
     kafka_consumer_enabled: bool = False
+    # 배포로 종료 신호를 받았을 때, 처리 중인 리뷰를 강제 취소하기 전에 기다려주는
+    # 최대 시간. llm_timeout_seconds보다 넉넉해야 정상 완료를 강제 취소로 놓치지 않는다.
+    graceful_shutdown_seconds: float = 130.0
 
     llm_profile: str = "dual_gpu_32gb"
     llm_base_url: str = "http://localhost:8001/v1"
