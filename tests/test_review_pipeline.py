@@ -10,22 +10,30 @@ from app.review.schema import (
     ReviewFailedEvent,
     ReviewModelOutput,
     ReviewRequestedEvent,
+    Severity,
     make_review_job_id,
 )
 
 
-def _comment(**kwargs):  # type: ignore[no-untyped-def]
-    base = {
-        "severity": "major",
-        "confidence": 0.9,
-        "file_path": "a.py",
-        "line": 1,
-        "title": "t",
-        "message": "m",
-        "evidence": ["e"],
-    }
-    base.update(kwargs)
-    return ReviewComment(**base)
+def _comment(
+    *,
+    severity: Severity = "major",
+    confidence: float = 0.9,
+    file_path: str = "a.py",
+    line: int = 1,
+    title: str = "t",
+    message: str = "m",
+    evidence: list[str] | None = None,
+) -> ReviewComment:
+    return ReviewComment(
+        severity=severity,
+        confidence=confidence,
+        file_path=file_path,
+        line=line,
+        title=title,
+        message=message,
+        evidence=evidence if evidence is not None else ["e"],
+    )
 
 
 class FakeLLM:
@@ -179,6 +187,7 @@ async def test_run_returns_failed_on_validation_error() -> None:
             line=1,
             title="t",
             message="m",
+            evidence=["x"],
         )
     except ValidationError as exc:
         validation_error = exc
@@ -202,9 +211,10 @@ async def test_run_returns_failed_on_server_error() -> None:
 
 
 @pytest.mark.parametrize("reviews", [[], None])
-def test_review_model_output_defaults(reviews: list | None) -> None:
-    kwargs = {"summary": "s"}
-    if reviews is not None:
-        kwargs["reviews"] = reviews
-    output = ReviewModelOutput(**kwargs)
+def test_review_model_output_defaults(reviews: list[ReviewComment] | None) -> None:
+    output = (
+        ReviewModelOutput(summary="s")
+        if reviews is None
+        else ReviewModelOutput(summary="s", reviews=reviews)
+    )
     assert output.reviews == []
