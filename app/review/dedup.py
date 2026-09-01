@@ -1,9 +1,12 @@
+import logging
 from collections.abc import Awaitable
 from typing import Protocol
 
 from redis.asyncio import Redis
 
 from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 _IN_PROGRESS = "in_progress"
 _COMPLETED = "completed"
@@ -49,18 +52,36 @@ class RedisDedupStore:
         return f"{self._key_prefix}{review_job_id}"
 
     async def try_start(self, review_job_id: str) -> bool:
-        acquired = await self._redis.set(
-            self._key(review_job_id), _IN_PROGRESS, nx=True, ex=self._ttl_seconds
-        )
+        try:
+            acquired = await self._redis.set(
+                self._key(review_job_id), _IN_PROGRESS, nx=True, ex=self._ttl_seconds
+            )
+        except Exception:
+            logger.exception(
+                "redis try_start failed for reviewJobId=%s", review_job_id
+            )
+            raise
         return bool(acquired)
 
     async def mark_completed(self, review_job_id: str) -> None:
-        await self._redis.set(
-            self._key(review_job_id), _COMPLETED, ex=self._ttl_seconds
-        )
+        try:
+            await self._redis.set(
+                self._key(review_job_id), _COMPLETED, ex=self._ttl_seconds
+            )
+        except Exception:
+            logger.exception(
+                "redis mark_completed failed for reviewJobId=%s", review_job_id
+            )
+            raise
 
     async def mark_failed(self, review_job_id: str) -> None:
-        await self._redis.delete(self._key(review_job_id))
+        try:
+            await self._redis.delete(self._key(review_job_id))
+        except Exception:
+            logger.exception(
+                "redis mark_failed failed for reviewJobId=%s", review_job_id
+            )
+            raise
 
 
 def create_redis_client(settings: Settings) -> Redis:

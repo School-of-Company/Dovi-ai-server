@@ -1,6 +1,9 @@
+import logging
 from typing import Any, Protocol
 
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent
+
+logger = logging.getLogger(__name__)
 
 
 class MessageSender(Protocol):
@@ -37,4 +40,15 @@ class ReviewEventProducer:
     ) -> None:
         key = event.review_job_id.encode("utf-8")
         value = event.model_dump_json(by_alias=True).encode("utf-8")
-        await self._sender.send_and_wait(topic, value=value, key=key)
+        try:
+            await self._sender.send_and_wait(topic, value=value, key=key)
+        except Exception:
+            logger.exception(
+                "failed to publish reviewJobId=%s topic=%s",
+                event.review_job_id,
+                topic,
+            )
+            raise
+        logger.info(
+            "published reviewJobId=%s topic=%s", event.review_job_id, topic
+        )
