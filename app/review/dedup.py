@@ -41,7 +41,9 @@ class RedisDedupStore:
         self,
         redis: RedisLike,
         *,
-        key_prefix: str = "review:state:",
+        # Redis를 Dovi-github-app과 공유하는데, 그쪽도 review:state:{reviewJobId}
+        # 키를 자체 상태 추적용으로 써서 실제로 충돌한 적이 있다 (#40).
+        key_prefix: str = "ai-review:dedup:",
         ttl_seconds: int = 86400,
     ) -> None:
         self._redis = redis
