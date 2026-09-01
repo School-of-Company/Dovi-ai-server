@@ -40,6 +40,9 @@ class ReviewTarget(CamelModel):
     file_path: str
     status: FileStatus
     hunks: list[str] = []
+    # 변경된 라인을 포함하는 함수/클래스 전체 소스 (tree-sitter). content가 없거나
+    # 미지원 언어면 비어있고, 이 경우 hunks만으로 리뷰가 진행된다.
+    context_chunks: list[str] = []
 
 
 class ReviewComment(CamelModel):

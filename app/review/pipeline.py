@@ -36,7 +36,12 @@ _SYSTEM_PROMPT = (
     "quoting the exact diff line(s) that support the finding, verbatim in "
     "the diff's original language (never translate evidence). Findings with "
     "empty `evidence` are discarded before reaching the user, so never leave "
-    "it empty."
+    "it empty.\n\n"
+    "Some files include a '전체 함수/클래스 컨텍스트' section showing the full "
+    "source of the function or class a change belongs to, in addition to the "
+    "diff hunk. Use it only to understand surrounding code (signatures, "
+    "control flow) — `evidence` must still quote from the diff hunk, not "
+    "from this extra context."
 )
 
 
@@ -140,12 +145,17 @@ class ReviewPipeline:
     def _build_messages(
         self, event: ReviewRequestedEvent, targets: list[ReviewTarget]
     ) -> list[ChatMessage]:
-        diff = "\n\n".join(
-            f"# {t.file_path} ({t.status})\n" + "\n".join(t.hunks) for t in targets
-        )
+        diff = "\n\n".join(self._render_target(t) for t in targets)
         context = build_context(event.context_files)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user},
         ]
+
+    def _render_target(self, target: ReviewTarget) -> str:
+        block = f"# {target.file_path} ({target.status})\n" + "\n".join(target.hunks)
+        if target.context_chunks:
+            context_section = "\n\n".join(target.context_chunks)
+            block += f"\n\n#### 전체 함수/클래스 컨텍스트\n{context_section}"
+        return block

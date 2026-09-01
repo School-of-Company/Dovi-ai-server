@@ -1,5 +1,6 @@
 from pathlib import PurePosixPath
 
+from app.review.chunking import extract_context_chunks
 from app.review.schema import ChangedFile, ReviewRequestedEvent, ReviewTarget
 
 _LOCKFILES = {
@@ -66,6 +67,20 @@ def _split_hunks(patch: str) -> list[str]:
     return hunks
 
 
+def _build_context_chunks(file: ChangedFile) -> list[str]:
+    # content(변경 후 파일 전체)가 있어야 AST를 파싱할 수 있다. 없으면 hunks만으로
+    # 리뷰가 진행된다 (1단계 MVP 동작과 동일).
+    if not file.content:
+        return []
+    chunks = extract_context_chunks(file.file_path, file.content, file.patch)
+    if not chunks:
+        return []
+    return [
+        f"### {c.node_type} {c.name or ''} (lines {c.start_line}-{c.end_line})\n{c.source}"
+        for c in chunks
+    ]
+
+
 def analyze(event: ReviewRequestedEvent) -> list[ReviewTarget]:
     targets: list[ReviewTarget] = []
     for file in event.changed_files:
@@ -79,6 +94,7 @@ def analyze(event: ReviewRequestedEvent) -> list[ReviewTarget]:
                 file_path=file.file_path,
                 status=file.status,
                 hunks=hunks,
+                context_chunks=_build_context_chunks(file),
             )
         )
     return targets
