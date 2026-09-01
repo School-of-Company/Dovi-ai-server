@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import Protocol
@@ -41,10 +42,14 @@ class ReviewRequestConsumer:
         self._producer = producer
         self._dedup = dedup
 
-    async def run(self) -> None:
+    async def run(self, shutdown: asyncio.Event | None = None) -> None:
+        """shutdown이 주어지면, 처리 중이던 메시지를 커밋까지 마친 뒤 다음 메시지를
+        가져오지 않고 반환한다 (graceful shutdown — app/main.py의 lifespan 참고)."""
         async for message in self._source:
             await self.handle(message.value)
             await self._source.commit()
+            if shutdown is not None and shutdown.is_set():
+                return
 
     async def handle(self, raw: bytes) -> None:
         try:
@@ -59,11 +64,16 @@ class ReviewRequestConsumer:
             )
             return
 
-        result = await self._pipeline.run(event)
-
-        if isinstance(result, ReviewCompletedEvent):
-            await self._producer.publish_completed(result)
-            await self._dedup.mark_completed(event.review_job_id)
-        else:
-            await self._producer.publish_failed(result)
+        try:
+            result = await self._pipeline.run(event)
+            if isinstance(result, ReviewCompletedEvent):
+                await self._producer.publish_completed(result)
+                await self._dedup.mark_completed(event.review_job_id)
+            else:
+                await self._producer.publish_failed(result)
+                await self._dedup.mark_failed(event.review_job_id)
+        except asyncio.CancelledError:
+            # graceful shutdown 유예시간을 넘겨 강제 취소된 경우 — 락을 풀어
+            # 재전달된 메시지를 새 인스턴스가 TTL을 기다리지 않고 재처리하게 한다.
             await self._dedup.mark_failed(event.review_job_id)
+            raise

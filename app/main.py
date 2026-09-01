@@ -18,10 +18,12 @@ from app.review.pipeline import ReviewPipeline
 logger = logging.getLogger(__name__)
 
 
-async def _run_consumer_forever(review_consumer: ReviewRequestConsumer) -> None:
-    while True:
+async def _run_consumer_forever(
+    review_consumer: ReviewRequestConsumer, shutdown: asyncio.Event
+) -> None:
+    while not shutdown.is_set():
         try:
-            await review_consumer.run()
+            await review_consumer.run(shutdown)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -64,11 +66,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     review_consumer = ReviewRequestConsumer(
         kafka_consumer, pipeline, event_producer, dedup_store
     )
-    consumer_task = asyncio.create_task(_run_consumer_forever(review_consumer))
+    shutdown_event = asyncio.Event()
+    consumer_task = asyncio.create_task(
+        _run_consumer_forever(review_consumer, shutdown_event)
+    )
 
     try:
         yield
     finally:
+        # 처리 중인 메시지가 있으면 커밋까지 마무리할 시간을 준다. 유예시간을
+        # 넘기면 강제 취소하되, 락 해제는 consumer.handle()이 책임진다.
+        shutdown_event.set()
+        try:
+            await asyncio.wait_for(
+                consumer_task, timeout=settings.graceful_shutdown_seconds
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            pass
         consumer_task.cancel()
         try:
             await consumer_task

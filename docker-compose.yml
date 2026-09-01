@@ -4,3 +4,6 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
+    # graceful_shutdown_seconds(기본 130s)보다 넉넉해야 앱이 처리 중이던 리뷰를
+    # 마무리할 시간을 벌기 전에 SIGKILL 당하지 않는다.
+    stop_grace_period: 150s
