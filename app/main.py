@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+from app.common.logger import configure_logging
 from app.core.config import get_settings
 from app.kafka.client import create_consumer, create_producer
 from app.kafka.consumer import ReviewRequestConsumer
@@ -80,6 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 settings = get_settings()
+configure_logging(settings.log_level)
 
 app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
 

@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import sys
 
+from app.common.logger import configure_logging
 from app.core.config import get_settings
 from app.kafka.client import create_consumer, create_producer
 from app.kafka.consumer import ReviewRequestConsumer
@@ -28,6 +29,7 @@ from scripts._fake_llm import FakeLLM
 
 async def _run(use_real: bool) -> None:
     settings = get_settings()
+    configure_logging(settings.log_level)
 
     llm: LLMClient
     real_client: OpenAICompatibleLLMClient | None = None

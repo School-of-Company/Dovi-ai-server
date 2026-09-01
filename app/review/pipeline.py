@@ -57,18 +57,35 @@ class ReviewPipeline:
             try:
                 output = await self._llm.generate(messages, max_tokens=self._max_tokens)
             except TimeoutError:
+                logger.warning(
+                    "LLM timeout reviewJobId=%s", event.review_job_id
+                )
                 return self._failed(event, "timeout")
             except (ValueError, ValidationError):
+                logger.warning(
+                    "LLM output parse_error reviewJobId=%s", event.review_job_id
+                )
                 last_reason = "parse_error"
                 continue
             except Exception:
-                logger.exception("unexpected error during LLM generation")
+                logger.exception(
+                    "unexpected error during LLM generation reviewJobId=%s",
+                    event.review_job_id,
+                )
                 last_reason = "server_error"
                 continue
 
             reviews = filter_reviews(output.reviews)
+            logger.info(
+                "review completed reviewJobId=%s reviewCount=%d",
+                event.review_job_id,
+                len(reviews),
+            )
             return self._completed(event, output.summary, reviews)
 
+        logger.warning(
+            "review failed reviewJobId=%s reason=%s", event.review_job_id, last_reason
+        )
         return self._failed(event, last_reason)
 
     def _completed(

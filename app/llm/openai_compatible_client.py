@@ -1,7 +1,11 @@
+import logging
+
 import httpx
 
 from app.llm.output_parser import parse_review_output
 from app.review.schema import ReviewModelOutput
+
+logger = logging.getLogger(__name__)
 
 ChatMessage = dict[str, str]
 
@@ -43,14 +47,25 @@ class OpenAICompatibleLLMClient:
         try:
             response = await self._client.post("/chat/completions", json=payload)
         except httpx.TimeoutException as exc:
+            logger.warning("LLM request timed out model=%s", self._model)
             raise TimeoutError("LLM request timed out") from exc
 
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.exception(
+                "LLM server returned error status=%s model=%s",
+                response.status_code,
+                self._model,
+            )
+            raise
+
         data = response.json()
 
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
+            logger.exception("unexpected LLM response shape model=%s", self._model)
             raise ValueError(f"unexpected LLM response shape: {exc}") from exc
 
         if not isinstance(content, str):

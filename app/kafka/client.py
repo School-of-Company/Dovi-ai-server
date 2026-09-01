@@ -1,15 +1,29 @@
+import logging
+
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 _CONSUMER_GROUP_ID = "dovi-ai-review-engine"
 
 
 def create_producer(settings: Settings) -> AIOKafkaProducer:
+    logger.info(
+        "creating kafka producer bootstrap_servers=%s",
+        settings.kafka_bootstrap_servers,
+    )
     return AIOKafkaProducer(bootstrap_servers=settings.kafka_bootstrap_servers)
 
 
 def create_consumer(settings: Settings) -> AIOKafkaConsumer:
+    logger.info(
+        "creating kafka consumer bootstrap_servers=%s topic=%s group_id=%s",
+        settings.kafka_bootstrap_servers,
+        settings.kafka_review_request_topic,
+        _CONSUMER_GROUP_ID,
+    )
     return AIOKafkaConsumer(
         settings.kafka_review_request_topic,
         bootstrap_servers=settings.kafka_bootstrap_servers,
