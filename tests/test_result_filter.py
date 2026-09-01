@@ -1,4 +1,4 @@
-from app.review.result_filter import filter_reviews
+from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import ReviewComment
 
 
@@ -67,12 +67,35 @@ def test_dedupes_same_location_keeps_highest_severity() -> None:
 
 def test_sorts_by_severity_then_confidence() -> None:
     reviews = [
-        _comment(severity="minor", line=1, title="a"),
         _comment(severity="critical", line=2, title="b"),
         _comment(severity="major", line=3, title="c"),
     ]
     result = filter_reviews(reviews)
-    assert [r.severity for r in result] == ["critical", "major", "minor"]
+    assert [r.severity for r in result] == ["critical", "major"]
+
+
+def test_drops_minor_and_suggestion_from_inline() -> None:
+    reviews = [
+        _comment(severity="minor", line=1, title="a"),
+        _comment(severity="suggestion", line=2, title="b"),
+        _comment(severity="major", line=3, title="c"),
+    ]
+    result = filter_reviews(reviews)
+    assert [r.severity for r in result] == ["major"]
+
+
+def test_summarize_minor_collects_non_inline_titles() -> None:
+    reviews = [
+        _comment(severity="critical", line=1, title="a"),
+        _comment(severity="minor", line=2, title="b"),
+        _comment(severity="suggestion", line=3, title="c"),
+    ]
+    assert summarize_minor(reviews) == ["b", "c"]
+
+
+def test_summarize_minor_drops_low_confidence() -> None:
+    reviews = [_comment(severity="minor", line=1, title="a", confidence=0.2)]
+    assert summarize_minor(reviews, min_confidence=0.5) == []
 
 
 def test_max_comments_limit() -> None:

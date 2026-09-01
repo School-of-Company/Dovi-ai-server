@@ -14,6 +14,20 @@ from app.review.schema import (
 )
 
 
+def _comment(**kwargs):  # type: ignore[no-untyped-def]
+    base = {
+        "severity": "major",
+        "confidence": 0.9,
+        "file_path": "a.py",
+        "line": 1,
+        "title": "t",
+        "message": "m",
+        "evidence": ["e"],
+    }
+    base.update(kwargs)
+    return ReviewComment(**base)
+
+
 class FakeLLM:
     def __init__(
         self,
@@ -127,6 +141,21 @@ async def test_run_retries_server_error_then_succeeds() -> None:
 
     assert isinstance(result, ReviewCompletedEvent)
     assert fake.call_count == 2
+
+
+async def test_run_moves_minor_reviews_to_summary_only() -> None:
+    reviews = [
+        _comment(severity="critical", line=1, title="critical finding"),
+        _comment(severity="minor", line=2, title="minor finding"),
+    ]
+    fake = FakeLLM(output=ReviewModelOutput(summary="요약", reviews=reviews))
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert [r.severity for r in result.reviews] == ["critical"]
+    assert "minor finding" in result.summary
+    assert "요약" in result.summary
 
 
 async def test_run_skips_when_no_changed_files() -> None:
