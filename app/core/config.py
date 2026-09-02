@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     kafka_review_request_topic: str = "pr.review.requested"
     kafka_review_completed_topic: str = "pr.review.completed"
     kafka_review_failed_topic: str = "pr.review.failed"
+    kafka_comment_answer_request_topic: str = "pr.comment.answer.requested"
+    kafka_comment_answer_completed_topic: str = "pr.comment.answer.completed"
+    kafka_comment_answer_failed_topic: str = "pr.comment.answer.failed"
     # 기본 False: 테스트/CI에서 TestClient가 앱을 기동해도 실제 Kafka/LLM에
     # 연결을 시도하지 않는다. 운영 배포 시 .env에서 명시적으로 true로 켠다.
     kafka_consumer_enabled: bool = False
@@ -29,6 +32,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)
     review_dedup_ttl_seconds: int = 86400
+    # 코멘트 Q&A는 리뷰보다 훨씬 가벼운 단발성 작업이라 TTL을 짧게 잡는다 (기본 1시간)
+    comment_answer_dedup_ttl_seconds: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

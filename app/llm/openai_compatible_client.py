@@ -33,16 +33,36 @@ class OpenAICompatibleLLMClient:
     async def generate(
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
     ) -> ReviewModelOutput:
-        payload = {
+        content = await self._complete(
+            messages,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "review_output", "schema": self._schema},
+            },
+        )
+        return parse_review_output(content)
+
+    async def generate_text(
+        self, messages: list[ChatMessage], *, max_tokens: int = 500
+    ) -> str:
+        return await self._complete(messages, max_tokens=max_tokens)
+
+    async def _complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int,
+        response_format: dict[str, object] | None = None,
+    ) -> str:
+        payload: dict[str, object] = {
             "model": self._model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "review_output", "schema": self._schema},
-            },
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         try:
             response = await self._client.post("/chat/completions", json=payload)
@@ -71,7 +91,7 @@ class OpenAICompatibleLLMClient:
         if not isinstance(content, str):
             raise ValueError(f"LLM response content is not a string: {content!r}")
 
-        return parse_review_output(content)
+        return content
 
     async def aclose(self) -> None:
         await self._client.aclose()

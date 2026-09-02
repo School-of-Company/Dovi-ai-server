@@ -92,3 +92,13 @@ def create_redis_client(settings: Settings) -> Redis:
 
 def create_dedup_store(settings: Settings, redis: RedisLike) -> RedisDedupStore:
     return RedisDedupStore(redis, ttl_seconds=settings.review_dedup_ttl_seconds)
+
+
+def create_comment_answer_dedup_store(
+    settings: Settings, redis: RedisLike
+) -> RedisDedupStore:
+    return RedisDedupStore(
+        redis,
+        key_prefix="ai-review:comment-answer-dedup:",
+        ttl_seconds=settings.comment_answer_dedup_ttl_seconds,
+    )

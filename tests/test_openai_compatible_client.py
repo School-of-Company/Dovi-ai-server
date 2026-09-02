@@ -125,6 +125,41 @@ async def test_generate_invalid_json_content_raises_value_error() -> None:
         await client.generate([{"role": "user", "content": "hi"}])
 
 
+async def test_generate_text_returns_plain_string() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response("이건 자유 텍스트 답변입니다.")
+
+    client = _client(handler)
+    result = await client.generate_text([{"role": "user", "content": "hi"}])
+
+    assert result == "이건 자유 텍스트 답변입니다."
+
+
+async def test_generate_text_does_not_set_response_format() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _openai_response("답변")
+
+    client = _client(handler)
+    await client.generate_text([{"role": "user", "content": "hi"}], max_tokens=300)
+
+    body = captured["body"]
+    assert body["max_tokens"] == 300
+    assert "response_format" not in body
+
+
+async def test_generate_text_timeout_raises_builtin_timeout_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = _client(handler)
+
+    with pytest.raises(TimeoutError):
+        await client.generate_text([{"role": "user", "content": "hi"}])
+
+
 async def test_generate_schema_violation_raises_validation_error() -> None:
     bad_content = json.dumps(
         {
