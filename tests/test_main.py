@@ -57,16 +57,23 @@ async def test_lifespan_starts_and_cancels_consumer_when_enabled(
 
     fake_producer = FakeStartStop()
     fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
     monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
     monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
 
     try:
         async with lifespan(app):
             await asyncio.sleep(0.05)
             assert fake_producer.started
             assert fake_consumer.started
+            assert fake_comment_answer_consumer.started
 
         assert fake_producer.stopped
         assert fake_consumer.stopped
+        assert fake_comment_answer_consumer.stopped
     finally:
         get_settings.cache_clear()

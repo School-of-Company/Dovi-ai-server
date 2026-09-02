@@ -44,6 +44,11 @@ class OpenAICompatibleLLMClient:
         )
         return parse_review_output(content)
 
+    async def generate_text(
+        self, messages: list[ChatMessage], *, max_tokens: int = 500
+    ) -> str:
+        return await self._complete(messages, max_tokens=max_tokens)
+
     async def verify_findings(
         self, messages: list[ChatMessage], *, max_tokens: int = 800
     ) -> VerificationResult:
