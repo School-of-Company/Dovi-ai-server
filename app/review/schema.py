@@ -61,6 +61,16 @@ class ReviewModelOutput(CamelModel):
     reviews: list[ReviewComment] = []
 
 
+class ReviewVerdict(CamelModel):
+    index: int
+    confirmed: bool
+    reason: str
+
+
+class VerificationResult(CamelModel):
+    verdicts: list[ReviewVerdict] = []
+
+
 class ReviewCompletedEvent(CamelModel):
     review_job_id: str
     repository_id: int

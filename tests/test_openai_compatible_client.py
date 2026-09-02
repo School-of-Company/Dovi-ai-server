@@ -7,9 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
-from app.review.schema import ReviewModelOutput
+from app.review.schema import ReviewModelOutput, VerificationResult
 
 _VALID_CONTENT = json.dumps({"summary": "ok", "reviews": []})
+_VALID_VERIFICATION_CONTENT = json.dumps(
+    {"verdicts": [{"index": 0, "confirmed": True, "reason": "ok"}]}
+)
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> OpenAICompatibleLLMClient:
@@ -149,3 +152,41 @@ async def test_generate_schema_violation_raises_validation_error() -> None:
 
     with pytest.raises(ValidationError):
         await client.generate([{"role": "user", "content": "hi"}])
+
+
+async def test_verify_findings_returns_parsed_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response(_VALID_VERIFICATION_CONTENT)
+
+    client = _client(handler)
+    result = await client.verify_findings([{"role": "user", "content": "hi"}])
+
+    assert isinstance(result, VerificationResult)
+    assert result.verdicts[0].confirmed is True
+
+
+async def test_verify_findings_sends_its_own_json_schema() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _openai_response(_VALID_VERIFICATION_CONTENT)
+
+    client = _client(handler)
+    await client.verify_findings([{"role": "user", "content": "hi"}], max_tokens=200)
+
+    body = captured["body"]
+    assert body["max_tokens"] == 200
+    assert body["response_format"]["json_schema"]["name"] == "verification_result"
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert "verdicts" in schema["properties"]
+
+
+async def test_verify_findings_timeout_raises_builtin_timeout_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = _client(handler)
+
+    with pytest.raises(TimeoutError):
+        await client.verify_findings([{"role": "user", "content": "hi"}])

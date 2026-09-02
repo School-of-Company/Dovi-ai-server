@@ -2,8 +2,8 @@ import logging
 
 import httpx
 
-from app.llm.output_parser import parse_review_output
-from app.review.schema import ReviewModelOutput
+from app.llm.output_parser import parse_review_output, parse_verification_result
+from app.review.schema import ReviewModelOutput, VerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +29,52 @@ class OpenAICompatibleLLMClient:
             base_url=base_url, timeout=timeout_seconds
         )
         self._schema = ReviewModelOutput.model_json_schema(by_alias=True)
+        self._verification_schema = VerificationResult.model_json_schema(by_alias=True)
 
     async def generate(
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
     ) -> ReviewModelOutput:
-        payload = {
+        content = await self._complete(
+            messages,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "review_output", "schema": self._schema},
+            },
+        )
+        return parse_review_output(content)
+
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        content = await self._complete(
+            messages,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verification_result",
+                    "schema": self._verification_schema,
+                },
+            },
+        )
+        return parse_verification_result(content)
+
+    async def _complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int,
+        response_format: dict[str, object] | None = None,
+    ) -> str:
+        payload: dict[str, object] = {
             "model": self._model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "review_output", "schema": self._schema},
-            },
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         try:
             response = await self._client.post("/chat/completions", json=payload)
@@ -71,7 +103,7 @@ class OpenAICompatibleLLMClient:
         if not isinstance(content, str):
             raise ValueError(f"LLM response content is not a string: {content!r}")
 
-        return parse_review_output(content)
+        return content
 
     async def aclose(self) -> None:
         await self._client.aclose()
