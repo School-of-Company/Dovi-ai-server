@@ -86,3 +86,22 @@ def test_keeps_false_positive_directories() -> None:
     )
     targets = analyze(event)
     assert len(targets) == 2
+
+
+def test_context_chunks_empty_without_content() -> None:
+    event = _event(ChangedFile(file_path="app/main.py", status="modified", patch=_PATCH))
+    targets = analyze(event)
+    assert targets[0].context_chunks == []
+
+
+def test_context_chunks_populated_when_content_available() -> None:
+    content = "def foo():\n    line1 = 1\n    added = 1\n    line2 = 1\n"
+    patch = "@@ -1,2 +1,3 @@\n line1\n+added\n line2"
+    event = _event(
+        ChangedFile(file_path="app/main.py", status="modified", patch=patch, content=content)
+    )
+
+    targets = analyze(event)
+
+    assert len(targets[0].context_chunks) == 1
+    assert "def foo():" in targets[0].context_chunks[0]

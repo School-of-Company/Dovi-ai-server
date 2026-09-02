@@ -151,6 +151,32 @@ async def test_run_retries_server_error_then_succeeds() -> None:
     assert fake.call_count == 2
 
 
+async def test_run_includes_ast_context_chunk_when_content_available() -> None:
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(
+                file_path="app/main.py",
+                status="modified",
+                patch="@@ -1,2 +1,3 @@\n line1\n+added\n line2",
+                content="def foo():\n    line1 = 1\n    added = 1\n    line2 = 1\n",
+            )
+        ],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "전체 함수/클래스 컨텍스트" in user_message
+    assert "def foo():" in user_message
+
+
 async def test_run_moves_minor_reviews_to_summary_only() -> None:
     reviews = [
         _comment(severity="critical", line=1, title="critical finding"),
