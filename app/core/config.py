@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # 코멘트 Q&A는 리뷰보다 훨씬 가벼운 단발성 작업이라 TTL을 짧게 잡는다 (기본 1시간)
     comment_answer_dedup_ttl_seconds: int = 3600
 
+    qdrant_url: str = "http://localhost:6333"
+    rag_collection_name: str = "dovi_code_chunks"
+    embedding_model: str = "nomic-ai/CodeRankEmbed"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
