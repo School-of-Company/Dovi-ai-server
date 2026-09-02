@@ -138,7 +138,11 @@ def extract_context_chunks(
         # fallback"하는 best-effort 보강 기능이라, 여기서 넓게 잡아 삼키는 게 맞다.
         return None
 
-    boundary_types = _BOUNDARY_NODE_TYPES[language]
+    # detect_language()가 반환하는 언어는 현재 항상 _BOUNDARY_NODE_TYPES에 정의돼
+    # 있지만, 새 확장자/언어를 한쪽에만 추가하는 실수를 막기 위해 방어적으로 처리한다.
+    boundary_types = _BOUNDARY_NODE_TYPES.get(language)
+    if boundary_types is None:
+        return None
     encoded_lines = encoded.split(b"\n")
     seen_ranges: set[tuple[int, int]] = set()
     chunks: list[AstChunk] = []
