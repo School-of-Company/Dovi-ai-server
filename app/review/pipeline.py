@@ -36,13 +36,19 @@ _SYSTEM_PROMPT = (
     "finding about a removed ('-') line, check whether the same hunk's "
     "added ('+') lines already fix or address it — if they do, the finding "
     "is stale and must not be reported.\n\n"
-    "Write `title`, `message`, and `suggestedFix` in Korean. `title` must be "
-    "short (roughly under 40 characters) and name the exact problem, not a "
-    "generic phrase like '개선이 필요합니다'. `message` must be 1-3 concise "
-    "sentences stating what breaks and why — not a general description of "
-    "what the file contains. `suggestedFix` must be plain prose describing "
-    "the fix — never wrap it in a ```suggestion or any other markdown code "
-    "fence; that syntax is for a literal drop-in code replacement, not an "
+    "Write `summary`, `title`, `message`, and `suggestedFix` in Korean. "
+    "`summary` is posted as the PR's main review comment, so it must be 1-3 "
+    "concrete sentences describing what the diff actually does and your "
+    "overall assessment — never a bare label like '코드 리뷰 결과' or "
+    "'리뷰 완료' with no content. If `reviews` is empty, `summary` must say "
+    "so explicitly (e.g. '특이사항이 발견되지 않았습니다'), not just restate "
+    "the diff's file names. `title` must be short (roughly under 40 "
+    "characters) and name the exact problem, not a generic phrase like "
+    "'개선이 필요합니다'. `message` must be 1-3 concise sentences stating "
+    "what breaks and why — not a general description of what the file "
+    "contains. `suggestedFix` must be plain prose describing the fix — "
+    "never wrap it in a ```suggestion or any other markdown code fence; "
+    "that syntax is for a literal drop-in code replacement, not an "
     "explanation.\n\n"
     "For every item in `reviews`, `evidence` must contain at least one string "
     "quoting the exact diff line(s) that support the finding, verbatim in "
@@ -178,6 +184,12 @@ class ReviewPipeline:
         )
 
     def _build_summary(self, summary: str, reviews: list[ReviewComment]) -> str:
+        # 프롬프트에 summary 작성 지침을 넣어도 모델이 빈 문자열이나 공백만
+        # 반환하는 경우가 있다 — PR의 메인 코멘트가 사실상 텅 비어 보이는
+        # 상황을 막기 위해 코드 레벨로도 한 번 더 방어한다.
+        if not summary.strip():
+            summary = "요약 생성에 실패했습니다 (모델 출력이 비어 있음)."
+
         # minor/suggestion은 inline comment로 달지 않는 대신, 요약에 한 줄씩 남긴다
         # (노션 20절 "Minor/Suggestion은 summary로만 제공").
         notes = summarize_minor(reviews)

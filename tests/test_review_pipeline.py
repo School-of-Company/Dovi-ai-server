@@ -213,6 +213,16 @@ async def test_run_moves_minor_reviews_to_summary_only() -> None:
     assert "요약" in result.summary
 
 
+async def test_run_replaces_empty_summary_with_fallback() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="   ", reviews=[]))
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary.strip() != ""
+    assert "요약 생성에 실패했습니다" in result.summary
+
+
 async def test_run_drops_disputed_findings() -> None:
     reviews = [
         _comment(severity="critical", line=1, title="real bug"),
