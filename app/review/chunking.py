@@ -172,3 +172,106 @@ def extract_context_chunks(
         )
 
     return chunks or None
+
+
+def extract_all_chunks(file_path: str, content: str) -> list[AstChunk] | None:
+    """레포 인덱싱(2단계 RAG)용 — 파일 전체에서 function/method/class 단위 chunk를 모두 추출한다.
+
+    diff 유무와 무관하게 파일 전체를 순회하는 점이 extract_context_chunks와 다르다.
+    class와 그 안에 중첩된 method를 모두 별도 chunk로 낸다(클래스 단위 개요 검색과
+    메서드 단위 세부 검색을 둘 다 지원하기 위한 의도적 중복).
+    """
+    language = detect_language(file_path)
+    if language is None:
+        return None
+
+    boundary_types = _BOUNDARY_NODE_TYPES.get(language)
+    if boundary_types is None:
+        return None
+
+    encoded = content.encode("utf-8")
+    try:
+        parser = _get_parser(language)
+        tree = parser.parse(encoded)
+    except Exception:
+        # extract_context_chunks와 동일하게, 파싱 실패 시 fallback 가능하도록
+        # 넓게 잡아 삼킨다.
+        return None
+
+    chunks: list[AstChunk] = []
+    stack: list[Node] = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type in boundary_types:
+            target = node
+            while target.parent is not None and target.parent.type in _WRAPPER_NODE_TYPES:
+                target = target.parent
+            chunks.append(
+                AstChunk(
+                    node_type=node.type,
+                    name=_extract_name(node),
+                    start_line=target.start_point[0] + 1,
+                    end_line=target.end_point[0] + 1,
+                    source=encoded[target.start_byte : target.end_byte].decode("utf-8"),
+                )
+            )
+        stack.extend(node.children)
+
+    if not chunks:
+        return None
+    chunks.sort(key=lambda c: c.start_line)
+    return chunks
+
+
+def merge_small_chunks(chunks: list[AstChunk], min_chars: int = 200) -> list[AstChunk]:
+    """너무 작은 chunk(한 줄짜리 함수 등)를 인접 chunk와 합쳐 임베딩 품질 저하를 줄인다.
+
+    파일 내 소스 순서(start_line)를 유지하며 바로 옆 chunk끼리만 합친다 — 서로 관련
+    없는 파일 반대편 chunk와 합쳐지지 않게 하기 위함.
+
+    extract_all_chunks는 class와 그 안의 nested method처럼 범위가 겹치는 chunk를
+    의도적으로 함께 반환할 수 있다. 겹치는 chunk를 같은 buffer에 합치면 nested
+    method의 소스가 class 소스 안에 이미 포함된 채로 다시 한번 이어붙어 중복된다.
+    그래서 다음 chunk가 현재 buffer의 범위와 겹치면, 합치지 않고 먼저 flush한다.
+    """
+    if not chunks:
+        return []
+
+    ordered = sorted(chunks, key=lambda c: c.start_line)
+    merged: list[AstChunk] = []
+    buffer: list[AstChunk] = []
+    buffer_end_line = -1
+
+    def flush() -> None:
+        nonlocal buffer_end_line
+        if not buffer:
+            return
+        if len(buffer) == 1:
+            merged.append(buffer[0])
+        else:
+            merged.append(
+                AstChunk(
+                    node_type="merged",
+                    name=None,
+                    start_line=buffer[0].start_line,
+                    end_line=buffer[-1].end_line,
+                    source="\n\n".join(c.source for c in buffer),
+                )
+            )
+        buffer.clear()
+        buffer_end_line = -1
+
+    size = 0
+    for chunk in ordered:
+        if buffer and chunk.start_line <= buffer_end_line:
+            flush()
+            size = 0
+        buffer.append(chunk)
+        buffer_end_line = max(buffer_end_line, chunk.end_line)
+        size += len(chunk.source)
+        if size >= min_chars:
+            flush()
+            size = 0
+    flush()
+
+    return merged
