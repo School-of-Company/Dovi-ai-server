@@ -10,8 +10,16 @@ from app.review.schema import (
     ReviewFailedEvent,
     ReviewModelOutput,
     ReviewRequestedEvent,
+    ReviewVerdict,
     Severity,
+    VerificationResult,
     make_review_job_id,
+)
+
+# 검증 대상 finding이 이 개수를 넘는 테스트는 없다고 가정하고, 기본 fake는
+# 넉넉하게 모든 인덱스를 confirmed 처리해 기존 테스트 동작을 그대로 유지한다.
+_CONFIRM_ALL = VerificationResult(
+    verdicts=[ReviewVerdict(index=i, confirmed=True, reason="ok") for i in range(20)]
 )
 
 
@@ -42,11 +50,16 @@ class FakeLLM:
         output: ReviewModelOutput | None = None,
         error: Exception | None = None,
         sequence: list[ReviewModelOutput | Exception] | None = None,
+        verify_result: VerificationResult | None = None,
+        verify_error: Exception | None = None,
     ) -> None:
         self._output = output
         self._error = error
         self._sequence = sequence
+        self._verify_result = verify_result if verify_result is not None else _CONFIRM_ALL
+        self._verify_error = verify_error
         self.received: list[ChatMessage] | None = None
+        self.verify_received: list[ChatMessage] | None = None
         self.call_count = 0
 
     async def generate(
@@ -65,6 +78,14 @@ class FakeLLM:
             raise self._error
         assert self._output is not None
         return self._output
+
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        self.verify_received = messages
+        if self._verify_error is not None:
+            raise self._verify_error
+        return self._verify_result
 
 
 def _event() -> ReviewRequestedEvent:
@@ -190,6 +211,65 @@ async def test_run_moves_minor_reviews_to_summary_only() -> None:
     assert [r.severity for r in result.reviews] == ["critical"]
     assert "minor finding" in result.summary
     assert "요약" in result.summary
+
+
+async def test_run_drops_disputed_findings() -> None:
+    reviews = [
+        _comment(severity="critical", line=1, title="real bug"),
+        _comment(severity="major", line=2, title="false positive"),
+    ]
+    verify_result = VerificationResult(
+        verdicts=[
+            ReviewVerdict(index=0, confirmed=True, reason="실제로 문제 있음"),
+            ReviewVerdict(index=1, confirmed=False, reason="구조적 타이핑이라 문제 없음"),
+        ]
+    )
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="요약", reviews=reviews),
+        verify_result=verify_result,
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert [r.title for r in result.reviews] == ["real bug"]
+    assert fake.verify_received is not None
+
+
+async def test_run_treats_missing_verdict_as_disputed() -> None:
+    reviews = [_comment(severity="critical", line=1, title="finding")]
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="요약", reviews=reviews),
+        verify_result=VerificationResult(verdicts=[]),
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.reviews == []
+
+
+async def test_run_discards_all_findings_when_verification_call_fails() -> None:
+    reviews = [_comment(severity="critical", line=1, title="finding")]
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="요약", reviews=reviews),
+        verify_error=RuntimeError("llm down"),
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.reviews == []
+
+
+async def test_run_skips_verification_when_no_inline_findings() -> None:
+    reviews = [_comment(severity="minor", line=1, title="minor finding")]
+    fake = FakeLLM(output=ReviewModelOutput(summary="요약", reviews=reviews))
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.verify_received is None
 
 
 async def test_run_skips_when_no_changed_files() -> None:

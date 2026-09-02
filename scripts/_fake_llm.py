@@ -1,7 +1,7 @@
 """여러 스크립트에서 재사용하는 고정 응답 FakeLLM (네트워크 불필요)."""
 
 from app.llm.client import ChatMessage
-from app.review.schema import ReviewComment, ReviewModelOutput
+from app.review.schema import ReviewComment, ReviewModelOutput, ReviewVerdict, VerificationResult
 
 
 class FakeLLM:
@@ -21,4 +21,12 @@ class FakeLLM:
                     evidence=["balance -= amount"],
                 )
             ],
+        )
+
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        # 로컬 테스트 스크립트용 fake라 항상 confirmed 처리한다.
+        return VerificationResult(
+            verdicts=[ReviewVerdict(index=0, confirmed=True, reason="[FAKE] ok")]
         )

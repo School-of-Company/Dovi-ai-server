@@ -2,8 +2,8 @@ import logging
 
 import httpx
 
-from app.llm.output_parser import parse_review_output
-from app.review.schema import ReviewModelOutput
+from app.llm.output_parser import parse_review_output, parse_verification_result
+from app.review.schema import ReviewModelOutput, VerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class OpenAICompatibleLLMClient:
             base_url=base_url, timeout=timeout_seconds
         )
         self._schema = ReviewModelOutput.model_json_schema(by_alias=True)
+        self._verification_schema = VerificationResult.model_json_schema(by_alias=True)
 
     async def generate(
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
@@ -47,6 +48,22 @@ class OpenAICompatibleLLMClient:
         self, messages: list[ChatMessage], *, max_tokens: int = 500
     ) -> str:
         return await self._complete(messages, max_tokens=max_tokens)
+
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        content = await self._complete(
+            messages,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verification_result",
+                    "schema": self._verification_schema,
+                },
+            },
+        )
+        return parse_verification_result(content)
 
     async def _complete(
         self,

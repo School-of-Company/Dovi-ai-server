@@ -1,4 +1,5 @@
 import logging
+from typing import Protocol
 
 from pydantic import ValidationError
 
@@ -13,6 +14,7 @@ from app.review.schema import (
     ReviewFailedEvent,
     ReviewRequestedEvent,
     ReviewTarget,
+    VerificationResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,20 +53,58 @@ _SYSTEM_PROMPT = (
     "from this extra context."
 )
 
+_VERIFY_SYSTEM_PROMPT = (
+    "You previously reviewed a PR diff and produced the numbered code review "
+    "findings below. Verify each one skeptically against the same diff — do "
+    "not just restate a finding as true.\n\n"
+    "Be especially skeptical of: claims that a structural/duck-typed type "
+    "swap (e.g. Python's `Protocol`, TypeScript structural interfaces) "
+    "breaks compatibility when method signatures still match; algorithmic-"
+    "complexity claims where the suggested alternative has the same "
+    "complexity as the original; treating an intentionally broad exception "
+    "handler (used for a documented fallback) as a bug; flagging code that "
+    "already has an equivalent safety check nearby; and suggestions that "
+    "would themselves violate this project's conventions (e.g. logging "
+    "full request payloads).\n\n"
+    "For every numbered finding, set `confirmed` to true only if the "
+    "described problem is real and `evidence` actually supports it. Give a "
+    "one-sentence `reason` either way, and set `index` to the finding's "
+    "number."
+)
+
+
+class VerifyingLLM(Protocol):
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        """이전에 생성한 finding들을 diff/컨텍스트에 비추어 다시 검증한다.
+
+        Raises:
+            TimeoutError: LLM API 호출 타임아웃
+            ValueError: 응답 파싱 또는 검증 실패
+        """
+        ...
+
+
+class ReviewLLM(LLMClient, VerifyingLLM, Protocol):
+    """ReviewPipeline이 필요로 하는 전체 인터페이스 (생성 + 자체 검증)."""
+
 
 class ReviewPipeline:
     def __init__(
         self,
-        llm: LLMClient,
+        llm: ReviewLLM,
         *,
         model_version: str,
         prompt_version: str,
         max_tokens: int = 1500,
+        verify_max_tokens: int = 800,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
         self._prompt_version = prompt_version
         self._max_tokens = max_tokens
+        self._verify_max_tokens = verify_max_tokens
 
     async def run(
         self, event: ReviewRequestedEvent
@@ -101,6 +141,8 @@ class ReviewPipeline:
                 continue
 
             reviews = filter_reviews(output.reviews)
+            if reviews:
+                reviews = await self._verify(event, messages, reviews)
             summary = self._build_summary(output.summary, output.reviews)
             logger.info(
                 "review completed reviewJobId=%s reviewCount=%d",
@@ -139,6 +181,80 @@ class ReviewPipeline:
             return summary
         bullet_list = "\n".join(f"- {title}" for title in notes)
         return f"{summary}\n\n참고(경미한 항목):\n{bullet_list}"
+
+    async def _verify(
+        self,
+        event: ReviewRequestedEvent,
+        messages: list[ChatMessage],
+        reviews: list[ReviewComment],
+    ) -> list[ReviewComment]:
+        """critical/major finding들을 diff에 비추어 다시 검증해, 확인된 것만 남긴다.
+
+        검증 호출 자체가 실패하면 원본을 그대로 노출하는 대신 보수적으로 이번
+        배치를 전부 폐기한다 (노션 "리뷰 결과 자체 검증" 문서 참고).
+        """
+        verify_messages = self._build_verify_messages(messages, reviews)
+        try:
+            result = await self._llm.verify_findings(
+                verify_messages, max_tokens=self._verify_max_tokens
+            )
+        except Exception:
+            logger.exception(
+                "verification LLM call failed reviewJobId=%s, discarding "
+                "findings defensively",
+                event.review_job_id,
+            )
+            return []
+
+        verdict_by_index = {v.index: v for v in result.verdicts}
+        confirmed: list[ReviewComment] = []
+        disputed = 0
+        for i, review in enumerate(reviews):
+            verdict = verdict_by_index.get(i)
+            if verdict is not None and verdict.confirmed:
+                confirmed.append(review)
+                continue
+            disputed += 1
+            logger.info(
+                "finding disputed reviewJobId=%s file=%s title=%s reason=%s",
+                event.review_job_id,
+                review.file_path,
+                review.title,
+                verdict.reason if verdict is not None else "no verdict returned",
+            )
+
+        if disputed:
+            logger.info(
+                "verification reviewJobId=%s confirmed=%d disputed=%d",
+                event.review_job_id,
+                len(confirmed),
+                disputed,
+            )
+        return confirmed
+
+    def _build_verify_messages(
+        self, original_messages: list[ChatMessage], reviews: list[ReviewComment]
+    ) -> list[ChatMessage]:
+        diff_and_context = original_messages[1]["content"]
+        findings = "\n\n".join(
+            self._render_finding(i, review) for i, review in enumerate(reviews)
+        )
+        user = f"{diff_and_context}\n\n## Findings to verify\n{findings}"
+        return [
+            {"role": "system", "content": _VERIFY_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ]
+
+    def _render_finding(self, index: int, review: ReviewComment) -> str:
+        evidence = "; ".join(review.evidence)
+        block = (
+            f"{index}. [{review.severity}] {review.title}\n"
+            f"{review.message}\n"
+            f"evidence: {evidence}"
+        )
+        if review.suggested_fix:
+            block += f"\nsuggestedFix: {review.suggested_fix}"
+        return block
 
     def _failed(
         self, event: ReviewRequestedEvent, reason: FailureReason

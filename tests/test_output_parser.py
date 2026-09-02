@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.llm.output_parser import parse_review_output
+from app.llm.output_parser import parse_review_output, parse_verification_result
 
 _VALID = '{"summary": "ok", "reviews": []}'
 
@@ -70,3 +70,22 @@ def test_schema_violation_raises_validation_error() -> None:
     )
     with pytest.raises(ValidationError):
         parse_review_output(text)
+
+
+def test_parses_verification_result() -> None:
+    text = '{"verdicts": [{"index": 0, "confirmed": true, "reason": "실제 버그"}]}'
+    result = parse_verification_result(text)
+    assert len(result.verdicts) == 1
+    assert result.verdicts[0].index == 0
+    assert result.verdicts[0].confirmed is True
+
+
+def test_parses_verification_result_in_code_fence() -> None:
+    text = '```json\n{"verdicts": []}\n```'
+    result = parse_verification_result(text)
+    assert result.verdicts == []
+
+
+def test_verification_result_invalid_json_raises_value_error() -> None:
+    with pytest.raises(ValueError):
+        parse_verification_result("not json at all")
