@@ -12,6 +12,7 @@ from app.review.schema import (
     ReviewFailedEvent,
     ReviewModelOutput,
     ReviewRequestedEvent,
+    VerificationResult,
 )
 
 
@@ -42,6 +43,11 @@ class FakeLLM:
     ) -> ReviewModelOutput:
         return self._output
 
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        return VerificationResult(verdicts=[])
+
 
 class FailingLLM:
     async def generate(
@@ -49,12 +55,22 @@ class FailingLLM:
     ) -> ReviewModelOutput:
         raise RuntimeError("boom")
 
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        return VerificationResult(verdicts=[])
+
 
 class CancellingLLM:
     async def generate(
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
     ) -> ReviewModelOutput:
         raise asyncio.CancelledError()
+
+    async def verify_findings(
+        self, messages: list[ChatMessage], *, max_tokens: int = 800
+    ) -> VerificationResult:
+        return VerificationResult(verdicts=[])
 
 
 class FakeProducer:
