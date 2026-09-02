@@ -55,9 +55,17 @@ def filter_reviews(
 def summarize_minor(
     reviews: list[ReviewComment], *, min_confidence: float = 0.5
 ) -> list[str]:
-    """inline에 안 다는 minor/suggestion 리뷰를 summary에 붙일 제목 목록으로 추린다."""
+    """inline에 안 다는 minor/suggestion 리뷰를 summary에 붙일 한 줄 설명 목록으로 추린다.
+
+    title만 남기면 모델이 title을 "코드 중복"처럼 짧게 쓸 때 무슨 문제인지 전혀
+    알 수 없는 라벨만 남는다. message(1-3문장 설명)를 함께 붙여서, title이
+    부실해도 최소한의 근거가 요약에 남게 한다. message가 비어 있는 항목은
+    (evidence가 빈 finding을 버리는 것과 동일하게) 노이즈이므로 제외한다.
+    """
     return [
-        r.title
+        f"{r.title}: {r.message}"
         for r in reviews
-        if r.severity not in _INLINE_SEVERITIES and r.confidence >= min_confidence
+        if r.severity not in _INLINE_SEVERITIES
+        and r.confidence >= min_confidence
+        and r.message.strip()
     ]

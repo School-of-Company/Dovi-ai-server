@@ -91,18 +91,28 @@ def test_drops_minor_and_suggestion_from_inline() -> None:
     assert [r.severity for r in result] == ["major"]
 
 
-def test_summarize_minor_collects_non_inline_titles() -> None:
+def test_summarize_minor_collects_non_inline_titles_with_message() -> None:
     reviews = [
         _comment(severity="critical", line=1, title="a"),
-        _comment(severity="minor", line=2, title="b"),
-        _comment(severity="suggestion", line=3, title="c"),
+        _comment(severity="minor", line=2, title="b", message="설명b"),
+        _comment(severity="suggestion", line=3, title="c", message="설명c"),
     ]
-    assert summarize_minor(reviews) == ["b", "c"]
+    assert summarize_minor(reviews) == ["b: 설명b", "c: 설명c"]
 
 
 def test_summarize_minor_drops_low_confidence() -> None:
     reviews = [_comment(severity="minor", line=1, title="a", confidence=0.2)]
     assert summarize_minor(reviews, min_confidence=0.5) == []
+
+
+def test_summarize_minor_drops_empty_message() -> None:
+    # title만 있고 message가 비어 있으면 근거 없는 라벨만 남으므로 노이즈로 취급해 제외한다.
+    reviews = [
+        _comment(severity="minor", line=1, title="코드 중복", message=""),
+        _comment(severity="minor", line=2, title="b", message="  "),
+        _comment(severity="minor", line=3, title="c", message="실제 설명"),
+    ]
+    assert summarize_minor(reviews) == ["c: 실제 설명"]
 
 
 def test_max_comments_limit() -> None:
