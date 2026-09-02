@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Protocol
 
 from fastapi import FastAPI
+from qdrant_client import QdrantClient
 
 from app.api.health import router as health_router
 from app.comment_answer.consumer import CommentAnswerConsumer
@@ -19,6 +20,9 @@ from app.kafka.client import (
 from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import CommentAnswerEventProducer, ReviewEventProducer
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
+from app.rag.embeddings import CodeRankEmbedClient
+from app.rag.retriever import ProjectContextRetriever
+from app.rag.vector_store import QdrantVectorStore
 from app.review.dedup import (
     create_comment_answer_dedup_store,
     create_dedup_store,
@@ -59,8 +63,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.llm_model,
         timeout_seconds=settings.llm_timeout_seconds,
     )
+
+    qdrant_client = None
+    retriever = None
+    if settings.rag_enabled:
+        embedder = CodeRankEmbedClient(settings.embedding_model)
+        qdrant_client = QdrantClient(url=settings.qdrant_url)
+        vector_store = QdrantVectorStore(
+            qdrant_client, settings.rag_collection_name, vector_size=embedder.dimension
+        )
+        retriever = ProjectContextRetriever(embedder, vector_store)
+
     pipeline = ReviewPipeline(
-        llm_client, model_version=settings.llm_model, prompt_version="v1"
+        llm_client,
+        model_version=settings.llm_model,
+        prompt_version="v1",
+        retriever=retriever,
     )
 
     comment_answer_pipeline = CommentAnswerPipeline(llm_client)
@@ -134,6 +152,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await kafka_producer.stop()
         await redis_client.aclose()
         await llm_client.aclose()
+        if qdrant_client is not None:
+            qdrant_client.close()
 
 
 settings = get_settings()

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.main import app, lifespan
+from app.review.pipeline import ReviewPipeline
 
 
 class FakeStartStop:
@@ -34,6 +35,18 @@ class FakeConsumerSource(FakeStartStop):
 
     async def commit(self) -> None:
         pass
+
+
+class FakeEmbedder:
+    @property
+    def dimension(self) -> int:
+        return 4
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return [0.0, 0.0, 0.0, 0.0]
 
 
 def test_health_check_with_consumer_disabled() -> None:
@@ -75,5 +88,56 @@ async def test_lifespan_starts_and_cancels_consumer_when_enabled(
         assert fake_producer.stopped
         assert fake_consumer.stopped
         assert fake_comment_answer_consumer.stopped
+    finally:
+        get_settings.cache_clear()
+
+
+class FakeQdrantClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def test_lifespan_wires_rag_retriever_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RAG_ENABLED=true 배선 경로(embedder/qdrant_client/vector_store/retriever 조립,
+    # 종료 시 qdrant_client.close())는 이 테스트 전까지 어떤 테스트에서도 실행되지
+    # 않았다 — 실제 모델/Qdrant 서버 없이 이 경로가 에러 없이 도는지 확인한다.
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("RAG_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    fake_qdrant_client = FakeQdrantClient()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr("app.main.CodeRankEmbedClient", lambda model_name: FakeEmbedder())
+    monkeypatch.setattr("app.main.QdrantClient", lambda url: fake_qdrant_client)
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("retriever") is not None
+        assert fake_qdrant_client.closed
     finally:
         get_settings.cache_clear()
