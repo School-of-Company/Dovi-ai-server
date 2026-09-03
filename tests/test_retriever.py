@@ -5,6 +5,8 @@ from app.rag.schema import ChunkSearchResult
 from app.rag.vector_store import QdrantVectorStore
 from app.review.chunking import AstChunk
 
+_REPO = 1
+
 
 class FakeEmbedder:
     def __init__(
@@ -26,7 +28,9 @@ class FakeEmbedder:
         return len(self._vector)
 
 
-def _store_with_chunk(file_path: str, vector: list[float]) -> QdrantVectorStore:
+def _store_with_chunk(
+    file_path: str, vector: list[float], *, repository_id: int = _REPO
+) -> QdrantVectorStore:
     client = QdrantClient(location=":memory:")
     store = QdrantVectorStore(client, "chunks", vector_size=len(vector))
     store.ensure_collection()
@@ -37,7 +41,7 @@ def _store_with_chunk(file_path: str, vector: list[float]) -> QdrantVectorStore:
         end_line=3,
         source="def bar(): pass",
     )
-    store.upsert_chunks(file_path, [chunk], [vector])
+    store.upsert_chunks(repository_id, file_path, [chunk], [vector])
     return store
 
 
@@ -45,17 +49,24 @@ def test_retrieve_returns_matching_chunk() -> None:
     store = _store_with_chunk("a.py", [1.0, 0.0, 0.0])
     retriever = ProjectContextRetriever(FakeEmbedder(), store)
 
-    results = retriever.retrieve("find bar")
+    results = retriever.retrieve("find bar", _REPO)
 
     assert len(results) == 1
     assert results[0].file_path == "a.py"
+
+
+def test_retrieve_scopes_search_to_given_repository_id() -> None:
+    store = _store_with_chunk("a.py", [1.0, 0.0, 0.0], repository_id=1)
+    retriever = ProjectContextRetriever(FakeEmbedder(), store)
+
+    assert retriever.retrieve("find bar", 2) == []
 
 
 def test_retrieve_excludes_given_file_path() -> None:
     store = _store_with_chunk("a.py", [1.0, 0.0, 0.0])
     retriever = ProjectContextRetriever(FakeEmbedder(), store)
 
-    results = retriever.retrieve("find bar", exclude_file_path="a.py")
+    results = retriever.retrieve("find bar", _REPO, exclude_file_path="a.py")
 
     assert results == []
 
@@ -64,7 +75,7 @@ def test_retrieve_returns_empty_for_blank_query() -> None:
     store = _store_with_chunk("a.py", [1.0, 0.0, 0.0])
     retriever = ProjectContextRetriever(FakeEmbedder(), store)
 
-    assert retriever.retrieve("   ") == []
+    assert retriever.retrieve("   ", _REPO) == []
 
 
 def test_retrieve_filters_by_min_score() -> None:
@@ -74,7 +85,7 @@ def test_retrieve_filters_by_min_score() -> None:
         FakeEmbedder(vector=[-1.0, 0.0, 0.0]), store, min_score=0.9
     )
 
-    assert retriever.retrieve("find bar") == []
+    assert retriever.retrieve("find bar", _REPO) == []
 
 
 def test_retrieve_swallows_embedder_errors_and_returns_empty() -> None:
@@ -83,7 +94,7 @@ def test_retrieve_swallows_embedder_errors_and_returns_empty() -> None:
         FakeEmbedder(error=RuntimeError("model not loaded")), store
     )
 
-    assert retriever.retrieve("find bar") == []
+    assert retriever.retrieve("find bar", _REPO) == []
 
 
 def test_retrieve_swallows_vector_store_errors_and_returns_empty() -> None:
@@ -93,7 +104,7 @@ def test_retrieve_swallows_vector_store_errors_and_returns_empty() -> None:
 
     retriever = ProjectContextRetriever(FakeEmbedder(), BoomStore())  # type: ignore[arg-type]
 
-    assert retriever.retrieve("find bar") == []
+    assert retriever.retrieve("find bar", _REPO) == []
 
 
 def _result(file_path: str, score: float = 0.9) -> ChunkSearchResult:
@@ -112,10 +123,12 @@ class SpyVectorStore:
     def __init__(self, results: list[ChunkSearchResult]) -> None:
         self._results = results
         self.received_limit: int | None = None
+        self.received_repository_id: int | None = None
 
     def search(
-        self, query_vector: list[float], *, limit: int = 5
+        self, repository_id: int, query_vector: list[float], *, limit: int = 5
     ) -> list[ChunkSearchResult]:
+        self.received_repository_id = repository_id
         self.received_limit = limit
         return self._results
 
@@ -140,13 +153,22 @@ class FakeReranker:
         return [by_file[f] for f in self._order if f in by_file]
 
 
+def test_retrieve_passes_repository_id_to_vector_store_search() -> None:
+    store = SpyVectorStore([_result("a.py")])
+    retriever = ProjectContextRetriever(FakeEmbedder(), store)  # type: ignore[arg-type]
+
+    retriever.retrieve("find bar", 42)
+
+    assert store.received_repository_id == 42
+
+
 def test_retrieve_overfetches_when_reranker_given() -> None:
     store = SpyVectorStore([_result("a.py")])
     retriever = ProjectContextRetriever(
         FakeEmbedder(), store, limit=3, reranker=FakeReranker()  # type: ignore[arg-type]
     )
 
-    retriever.retrieve("find bar")
+    retriever.retrieve("find bar", _REPO)
 
     assert store.received_limit == 12  # limit(3) * overfetch multiplier(4)
 
@@ -158,7 +180,7 @@ def test_retrieve_uses_reranked_order() -> None:
         FakeEmbedder(), store, reranker=reranker  # type: ignore[arg-type]
     )
 
-    results = retriever.retrieve("find bar")
+    results = retriever.retrieve("find bar", _REPO)
 
     assert [r.file_path for r in results] == ["b.py", "a.py"]
     assert reranker.received is not None
@@ -172,7 +194,7 @@ def test_retrieve_falls_back_to_embedding_order_when_reranker_fails() -> None:
         FakeEmbedder(), store, reranker=reranker  # type: ignore[arg-type]
     )
 
-    results = retriever.retrieve("find bar")
+    results = retriever.retrieve("find bar", _REPO)
 
     assert [r.file_path for r in results] == ["a.py", "b.py"]
 
@@ -188,7 +210,7 @@ def test_retrieve_passes_already_filtered_candidates_to_reranker() -> None:
         FakeEmbedder(), store, min_score=0.5, reranker=reranker  # type: ignore[arg-type]
     )
 
-    retriever.retrieve("find bar", exclude_file_path="a.py")
+    retriever.retrieve("find bar", _REPO, exclude_file_path="a.py")
 
     assert reranker.received is not None
     assert [c.file_path for c in reranker.received[1]] == ["b.py"]
@@ -201,6 +223,6 @@ def test_retrieve_truncates_reranked_results_to_limit() -> None:
         FakeEmbedder(), store, limit=1, reranker=reranker  # type: ignore[arg-type]
     )
 
-    results = retriever.retrieve("find bar")
+    results = retriever.retrieve("find bar", _REPO)
 
     assert [r.file_path for r in results] == ["c.py"]

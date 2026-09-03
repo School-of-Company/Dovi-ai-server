@@ -8,8 +8,13 @@ push 이벤트 기반 컨슈머가 담당한다 (노션 "repo 인덱싱(RAG) 트
 없으므로 지워지지 않는다 — 그런 정리(prune)까지 필요하면 컬렉션을 비우고
 처음부터 다시 실행한다.
 
+이 AI 서버 하나가 여러 레포를 동시에 인덱싱/서빙하므로, 검색 시 레포가 서로
+섞이지 않도록 GitHub repository id로 point를 스코핑한다. review pipeline의
+ReviewRequestedEvent.repository_id와 반드시 같은 값을 넘겨야 한다 (예:
+`gh api repos/{owner}/{repo} -q .id`로 조회).
+
 사용법:
-    uv run python scripts/index_repo.py --path /path/to/cloned/repo
+    uv run python scripts/index_repo.py --path /path/to/cloned/repo --repository-id 12345
 """
 
 import argparse
@@ -61,6 +66,7 @@ def iter_source_files(root: Path) -> list[Path]:
 def index_directory(
     root: Path,
     *,
+    repository_id: int,
     embedder: Embedder,
     vector_store: QdrantVectorStore,
     min_chars: int = 200,
@@ -84,13 +90,13 @@ def index_directory(
 
         # 재인덱싱 시 이 파일의 예전 point를 항상 먼저 비운다 — chunk 위치가
         # 바뀌거나 함수가 삭제되면 upsert만으로는 예전 point가 안 지워진다.
-        vector_store.delete_by_file(relative_path)
+        vector_store.delete_by_file(repository_id, relative_path)
         if chunks is None:
             continue
         chunks = merge_small_chunks(chunks, min_chars=min_chars)
 
         vectors = embedder.embed_documents([chunk.source for chunk in chunks])
-        vector_store.upsert_chunks(relative_path, chunks, vectors)
+        vector_store.upsert_chunks(repository_id, relative_path, chunks, vectors)
         total_chunks += len(chunks)
         logger.info("indexed file=%s chunks=%d", relative_path, len(chunks))
 
@@ -101,6 +107,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="로컬 레포를 Qdrant에 인덱싱한다")
     parser.add_argument("--path", required=True, help="인덱싱할 로컬 레포 경로")
+    parser.add_argument(
+        "--repository-id",
+        required=True,
+        type=int,
+        help="GitHub repository id (ReviewRequestedEvent.repository_id와 동일해야 함)",
+    )
     args = parser.parse_args()
 
     root = Path(args.path).resolve()
@@ -115,7 +127,9 @@ def main() -> None:
         client, settings.rag_collection_name, vector_size=embedder.dimension
     )
 
-    total = index_directory(root, embedder=embedder, vector_store=vector_store)
+    total = index_directory(
+        root, repository_id=args.repository_id, embedder=embedder, vector_store=vector_store
+    )
     print(f"인덱싱 완료: {total}개 chunk")
 
 
