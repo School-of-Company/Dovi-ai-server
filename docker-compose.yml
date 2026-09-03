@@ -7,3 +7,17 @@ services:
     # graceful_shutdown_seconds(기본 130s)보다 넉넉해야 앱이 처리 중이던 리뷰를
     # 마무리할 시간을 벌기 전에 SIGKILL 당하지 않는다.
     stop_grace_period: 150s
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    # 부트스트랩 인덱싱 CLI(scripts/index_repo.py)를 이 호스트에서 직접 돌릴 때만
+    # 필요해서 localhost로만 연다 — 외부에 인증 없는 벡터DB를 노출하지 않는다.
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:
