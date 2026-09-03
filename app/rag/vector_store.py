@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -14,6 +13,7 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
+from app.rag.schema import ChunkSearchResult
 from app.review.chunking import AstChunk
 
 logger = logging.getLogger(__name__)
@@ -26,17 +26,6 @@ _POINT_ID_NAMESPACE = uuid.UUID("6f8f7f2e-2b3a-4b8a-9b0e-7a1f6c9d2e3a")
 def _point_id(file_path: str, chunk: AstChunk) -> str:
     key = f"{file_path}:{chunk.start_line}:{chunk.end_line}:{chunk.node_type}:{chunk.name}"
     return str(uuid.uuid5(_POINT_ID_NAMESPACE, key))
-
-
-@dataclass
-class ChunkSearchResult:
-    file_path: str
-    node_type: str
-    name: str | None
-    start_line: int
-    end_line: int
-    source: str
-    score: float
 
 
 class QdrantVectorStore:

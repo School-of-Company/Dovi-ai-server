@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from typing import Protocol
 
 from fastapi import FastAPI
-from qdrant_client import QdrantClient
 
 from app.api.health import router as health_router
 from app.comment_answer.consumer import CommentAnswerConsumer
@@ -20,9 +19,6 @@ from app.kafka.client import (
 from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import CommentAnswerEventProducer, ReviewEventProducer
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
-from app.rag.embeddings import CodeRankEmbedClient
-from app.rag.retriever import ProjectContextRetriever
-from app.rag.vector_store import QdrantVectorStore
 from app.review.dedup import (
     create_comment_answer_dedup_store,
     create_dedup_store,
@@ -67,6 +63,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     qdrant_client = None
     retriever = None
     if settings.rag_enabled:
+        # qdrant-client는 numpy를 끌어오는데, 이를 지원 안 하는 CPU에서는 import만
+        # 해도 죽는다(RAG를 안 켜는 배포에까지 그 위험을 지우지 않도록 지연 import).
+        from qdrant_client import QdrantClient
+
+        from app.rag.embeddings import CodeRankEmbedClient
+        from app.rag.retriever import ProjectContextRetriever
+        from app.rag.vector_store import QdrantVectorStore
+
         embedder = CodeRankEmbedClient(settings.embedding_model)
         qdrant_client = QdrantClient(url=settings.qdrant_url)
         vector_store = QdrantVectorStore(

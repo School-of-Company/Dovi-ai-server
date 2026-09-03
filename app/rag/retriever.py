@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 
 from app.rag.embeddings import Embedder
-from app.rag.vector_store import ChunkSearchResult, QdrantVectorStore
+from app.rag.schema import ChunkSearchResult
+from app.rag.vector_store import QdrantVectorStore
 
 logger = logging.getLogger(__name__)
 
