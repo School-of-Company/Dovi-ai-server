@@ -1,9 +1,12 @@
+import asyncio
+import functools
 import logging
 from typing import Protocol
 
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage, LLMClient
+from app.rag.vector_store import ChunkSearchResult
 from app.review.context import build_context
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
@@ -56,10 +59,12 @@ _SYSTEM_PROMPT = (
     "empty `evidence` are discarded before reaching the user, so never leave "
     "it empty.\n\n"
     "Some files include a '전체 함수/클래스 컨텍스트' section showing the full "
-    "source of the function or class a change belongs to, in addition to the "
-    "diff hunk. Use it only to understand surrounding code (signatures, "
-    "control flow) — `evidence` must still quote from the diff hunk, not "
-    "from this extra context."
+    "source of the function or class a change belongs to, and/or a "
+    "'관련 프로젝트 코드' section showing similar or related code found "
+    "elsewhere in the project via search, in addition to the diff hunk. Use "
+    "both only to understand surrounding code and existing conventions "
+    "(signatures, control flow, naming) — `evidence` must still quote from "
+    "the diff hunk, not from either of these extra sections."
 )
 
 _VERIFY_SYSTEM_PROMPT = (
@@ -100,6 +105,14 @@ class ReviewLLM(LLMClient, VerifyingLLM, Protocol):
     """ReviewPipeline이 필요로 하는 전체 인터페이스 (생성 + 자체 검증)."""
 
 
+class ContextRetriever(Protocol):
+    def retrieve(
+        self, query_text: str, exclude_file_path: str | None = None
+    ) -> list[ChunkSearchResult]:
+        """query_text와 관련된 프로젝트 기존 코드를 찾는다. 실패 시 빈 리스트를 반환한다."""
+        ...
+
+
 class ReviewPipeline:
     def __init__(
         self,
@@ -109,12 +122,14 @@ class ReviewPipeline:
         prompt_version: str,
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
+        retriever: ContextRetriever | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
         self._prompt_version = prompt_version
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
+        self._retriever = retriever
 
     async def run(
         self, event: ReviewRequestedEvent
@@ -123,7 +138,8 @@ class ReviewPipeline:
         if not targets:
             return self._completed(event, "No reviewable changes found.", [])
 
-        messages = self._build_messages(event, targets)
+        related_context = await self._retrieve_related_context(targets)
+        messages = self._build_messages(event, targets, related_context)
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
         # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
@@ -281,10 +297,36 @@ class ReviewPipeline:
             reason=reason,
         )
 
+    async def _retrieve_related_context(
+        self, targets: list[ReviewTarget]
+    ) -> dict[str, list[ChunkSearchResult]]:
+        """target별로 관련 프로젝트 코드를 검색한다.
+
+        retriever가 없으면(RAG 미활성화) 즉시 빈 dict를 반환한다. 임베딩/검색은
+        CPU 바운드 작업이라 이벤트 루프를 막지 않도록 executor에서 돌린다.
+        """
+        if self._retriever is None:
+            return {}
+
+        loop = asyncio.get_running_loop()
+        related: dict[str, list[ChunkSearchResult]] = {}
+        for target in targets:
+            query = "\n".join(target.hunks)
+            call = functools.partial(
+                self._retriever.retrieve, query, exclude_file_path=target.file_path
+            )
+            related[target.file_path] = await loop.run_in_executor(None, call)
+        return related
+
     def _build_messages(
-        self, event: ReviewRequestedEvent, targets: list[ReviewTarget]
+        self,
+        event: ReviewRequestedEvent,
+        targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
     ) -> list[ChatMessage]:
-        diff = "\n\n".join(self._render_target(t) for t in targets)
+        diff = "\n\n".join(
+            self._render_target(t, related_context.get(t.file_path, [])) for t in targets
+        )
         context = build_context(event.context_files)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         return [
@@ -292,9 +334,16 @@ class ReviewPipeline:
             {"role": "user", "content": user},
         ]
 
-    def _render_target(self, target: ReviewTarget) -> str:
+    def _render_target(
+        self, target: ReviewTarget, related: list[ChunkSearchResult]
+    ) -> str:
         block = f"# {target.file_path} ({target.status})\n" + "\n".join(target.hunks)
         if target.context_chunks:
             context_section = "\n\n".join(target.context_chunks)
             block += f"\n\n#### 전체 함수/클래스 컨텍스트\n{context_section}"
+        if related:
+            related_section = "\n\n".join(
+                f"# {r.file_path} :: {r.name or r.node_type}\n{r.source}" for r in related
+            )
+            block += f"\n\n#### 관련 프로젝트 코드\n{related_section}"
         return block

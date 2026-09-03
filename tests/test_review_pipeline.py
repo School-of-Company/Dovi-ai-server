@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
+from app.rag.vector_store import ChunkSearchResult
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import (
     ChangedFile,
@@ -101,8 +102,25 @@ def _event() -> ReviewRequestedEvent:
     )
 
 
-def _pipeline(fake: FakeLLM) -> ReviewPipeline:
-    return ReviewPipeline(fake, model_version="qwen2.5-coder-14b", prompt_version="v1")
+def _pipeline(fake: FakeLLM, retriever: object = None) -> ReviewPipeline:
+    return ReviewPipeline(
+        fake,
+        model_version="qwen2.5-coder-14b",
+        prompt_version="v1",
+        retriever=retriever,  # type: ignore[arg-type]
+    )
+
+
+class FakeRetriever:
+    def __init__(self, results: list[ChunkSearchResult]) -> None:
+        self.results = results
+        self.received_queries: list[tuple[str, str | None]] = []
+
+    def retrieve(
+        self, query_text: str, exclude_file_path: str | None = None
+    ) -> list[ChunkSearchResult]:
+        self.received_queries.append((query_text, exclude_file_path))
+        return self.results
 
 
 def test_make_review_job_id() -> None:
@@ -196,6 +214,42 @@ async def test_run_includes_ast_context_chunk_when_content_available() -> None:
     user_message = fake.received[1]["content"]
     assert "전체 함수/클래스 컨텍스트" in user_message
     assert "def foo():" in user_message
+
+
+async def test_run_includes_related_project_code_from_retriever() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    retriever = FakeRetriever(
+        [
+            ChunkSearchResult(
+                file_path="app/other.py",
+                node_type="function_definition",
+                name="helper",
+                start_line=1,
+                end_line=3,
+                source="def helper(): return 1",
+                score=0.9,
+            )
+        ]
+    )
+
+    await _pipeline(fake, retriever).run(_event())
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 프로젝트 코드" in user_message
+    assert "def helper(): return 1" in user_message
+    # 리뷰 대상 파일 자기 자신은 제외하도록 exclude_file_path를 넘겼는지 확인
+    assert retriever.received_queries == [("@@ -1 +1 @@", "app/main.py")]
+
+
+async def test_run_without_retriever_skips_related_context_section() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(_event())
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 프로젝트 코드" not in user_message
 
 
 async def test_run_moves_minor_reviews_to_summary_only() -> None:

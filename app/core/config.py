@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # 코멘트 Q&A는 리뷰보다 훨씬 가벼운 단발성 작업이라 TTL을 짧게 잡는다 (기본 1시간)
     comment_answer_dedup_ttl_seconds: int = 3600
 
+    # 기본 False: Qdrant 인덱스가 아직 없는 레포/환경에서도 앱이 정상 기동해야 한다.
+    # scripts/index_repo.py로 인덱싱을 마친 뒤 .env에서 명시적으로 켠다.
+    rag_enabled: bool = False
     qdrant_url: str = "http://localhost:6333"
     rag_collection_name: str = "dovi_code_chunks"
     embedding_model: str = "nomic-ai/CodeRankEmbed"
