@@ -53,10 +53,12 @@ def test_index_directory_indexes_chunks_into_vector_store(tmp_path: Path) -> Non
     embedder = FakeEmbedder()
     store = _vector_store()
 
-    total = index_directory(tmp_path, embedder=embedder, vector_store=store)
+    total = index_directory(
+        tmp_path, repository_id=1, embedder=embedder, vector_store=store
+    )
 
     assert total == 1
-    results = store.search(embedder.embed_query("bar"), limit=5)
+    results = store.search(1, embedder.embed_query("bar"), limit=5)
     assert len(results) == 1
     assert results[0].file_path == "foo.py"
     assert results[0].name == "bar"
@@ -66,7 +68,9 @@ def test_index_directory_skips_files_with_no_extractable_chunks(tmp_path: Path) 
     (tmp_path / "README.md").write_text("# hi\n")
     (tmp_path / "no_functions.py").write_text("import os\n")
 
-    total = index_directory(tmp_path, embedder=FakeEmbedder(), vector_store=_vector_store())
+    total = index_directory(
+        tmp_path, repository_id=1, embedder=FakeEmbedder(), vector_store=_vector_store()
+    )
 
     assert total == 0
 
@@ -77,13 +81,13 @@ def test_index_directory_reruns_drop_stale_chunks_at_shifted_positions(tmp_path:
     target.write_text("def bar():\n    return 1\n")
     embedder = FakeEmbedder()
     store = _vector_store()
-    index_directory(tmp_path, embedder=embedder, vector_store=store)
+    index_directory(tmp_path, repository_id=1, embedder=embedder, vector_store=store)
 
     # 두 번째 실행: 위에 코드가 추가돼 함수 위치가 아래로 밀림
     target.write_text("import os\n\n\ndef bar():\n    return os.getcwd()\n")
-    index_directory(tmp_path, embedder=embedder, vector_store=store)
+    index_directory(tmp_path, repository_id=1, embedder=embedder, vector_store=store)
 
-    results = store.search(embedder.embed_query("bar"), limit=10)
+    results = store.search(1, embedder.embed_query("bar"), limit=10)
     # 재인덱싱 후에도 같은 함수의 point가 하나만 남아야 한다 (밀린 위치의 stale
     # point가 옛 위치에 남아 중복되면 안 된다)
     bar_results = [r for r in results if r.name == "bar"]
@@ -101,6 +105,8 @@ def test_index_directory_skips_unreadable_file(
 
     monkeypatch.setattr(Path, "read_text", _boom)
 
-    total = index_directory(tmp_path, embedder=FakeEmbedder(), vector_store=_vector_store())
+    total = index_directory(
+        tmp_path, repository_id=1, embedder=FakeEmbedder(), vector_store=_vector_store()
+    )
 
     assert total == 0

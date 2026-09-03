@@ -107,9 +107,15 @@ class ReviewLLM(LLMClient, VerifyingLLM, Protocol):
 
 class ContextRetriever(Protocol):
     def retrieve(
-        self, query_text: str, exclude_file_path: str | None = None
+        self,
+        query_text: str,
+        repository_id: int,
+        exclude_file_path: str | None = None,
     ) -> list[ChunkSearchResult]:
-        """query_text와 관련된 프로젝트 기존 코드를 찾는다. 실패 시 빈 리스트를 반환한다."""
+        """query_text와 관련된 프로젝트 기존 코드를 repository_id 범위 안에서 찾는다.
+
+        실패 시 빈 리스트를 반환한다.
+        """
         ...
 
 
@@ -138,7 +144,7 @@ class ReviewPipeline:
         if not targets:
             return self._completed(event, "No reviewable changes found.", [])
 
-        related_context = await self._retrieve_related_context(targets)
+        related_context = await self._retrieve_related_context(event.repository_id, targets)
         messages = self._build_messages(event, targets, related_context)
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
@@ -298,9 +304,9 @@ class ReviewPipeline:
         )
 
     async def _retrieve_related_context(
-        self, targets: list[ReviewTarget]
+        self, repository_id: int, targets: list[ReviewTarget]
     ) -> dict[str, list[ChunkSearchResult]]:
-        """target별로 관련 프로젝트 코드를 검색한다.
+        """target별로 관련 프로젝트 코드를 repository_id 범위 안에서 검색한다.
 
         retriever가 없으면(RAG 미활성화) 즉시 빈 dict를 반환한다. 임베딩/검색은
         CPU 바운드 작업이라 이벤트 루프를 막지 않도록 executor에서 돌린다.
@@ -313,7 +319,10 @@ class ReviewPipeline:
         for target in targets:
             query = "\n".join(target.hunks)
             call = functools.partial(
-                self._retriever.retrieve, query, exclude_file_path=target.file_path
+                self._retriever.retrieve,
+                query,
+                repository_id,
+                exclude_file_path=target.file_path,
             )
             related[target.file_path] = await loop.run_in_executor(None, call)
         return related

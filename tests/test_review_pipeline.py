@@ -114,12 +114,15 @@ def _pipeline(fake: FakeLLM, retriever: object = None) -> ReviewPipeline:
 class FakeRetriever:
     def __init__(self, results: list[ChunkSearchResult]) -> None:
         self.results = results
-        self.received_queries: list[tuple[str, str | None]] = []
+        self.received_queries: list[tuple[str, int, str | None]] = []
 
     def retrieve(
-        self, query_text: str, exclude_file_path: str | None = None
+        self,
+        query_text: str,
+        repository_id: int,
+        exclude_file_path: str | None = None,
     ) -> list[ChunkSearchResult]:
-        self.received_queries.append((query_text, exclude_file_path))
+        self.received_queries.append((query_text, repository_id, exclude_file_path))
         return self.results
 
 
@@ -239,7 +242,7 @@ async def test_run_includes_related_project_code_from_retriever() -> None:
     assert "관련 프로젝트 코드" in user_message
     assert "def helper(): return 1" in user_message
     # 리뷰 대상 파일 자기 자신은 제외하도록 exclude_file_path를 넘겼는지 확인
-    assert retriever.received_queries == [("@@ -1 +1 @@", "app/main.py")]
+    assert retriever.received_queries == [("@@ -1 +1 @@", 42, "app/main.py")]
 
 
 async def test_run_without_retriever_skips_related_context_section() -> None:

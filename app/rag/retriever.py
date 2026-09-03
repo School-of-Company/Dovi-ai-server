@@ -40,7 +40,10 @@ class ProjectContextRetriever:
         self._reranker = reranker
 
     def retrieve(
-        self, query_text: str, exclude_file_path: str | None = None
+        self,
+        query_text: str,
+        repository_id: int,
+        exclude_file_path: str | None = None,
     ) -> list[ChunkSearchResult]:
         if not query_text.strip():
             return []
@@ -51,7 +54,7 @@ class ProjectContextRetriever:
 
         try:
             query_vector = self._embedder.embed_query(query_text)
-            results = self._vector_store.search(query_vector, limit=search_limit)
+            results = self._vector_store.search(repository_id, query_vector, limit=search_limit)
         except Exception:
             logger.warning(
                 "project context retrieval failed, continuing without it", exc_info=True
