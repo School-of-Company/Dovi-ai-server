@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     rag_collection_name: str = "dovi_code_chunks"
     embedding_model: str = "nomic-ai/CodeRankEmbed"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

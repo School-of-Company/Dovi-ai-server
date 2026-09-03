@@ -1,6 +1,7 @@
 from qdrant_client import QdrantClient
 
 from app.rag.retriever import ProjectContextRetriever
+from app.rag.schema import ChunkSearchResult
 from app.rag.vector_store import QdrantVectorStore
 from app.review.chunking import AstChunk
 
@@ -93,3 +94,113 @@ def test_retrieve_swallows_vector_store_errors_and_returns_empty() -> None:
     retriever = ProjectContextRetriever(FakeEmbedder(), BoomStore())  # type: ignore[arg-type]
 
     assert retriever.retrieve("find bar") == []
+
+
+def _result(file_path: str, score: float = 0.9) -> ChunkSearchResult:
+    return ChunkSearchResult(
+        file_path=file_path,
+        node_type="function_definition",
+        name="bar",
+        start_line=1,
+        end_line=3,
+        source=f"def {file_path}(): pass",
+        score=score,
+    )
+
+
+class SpyVectorStore:
+    def __init__(self, results: list[ChunkSearchResult]) -> None:
+        self._results = results
+        self.received_limit: int | None = None
+
+    def search(
+        self, query_vector: list[float], *, limit: int = 5
+    ) -> list[ChunkSearchResult]:
+        self.received_limit = limit
+        return self._results
+
+
+class FakeReranker:
+    def __init__(
+        self, *, order: list[str] | None = None, error: Exception | None = None
+    ) -> None:
+        self._order = order
+        self._error = error
+        self.received: tuple[str, list[ChunkSearchResult]] | None = None
+
+    def rerank(
+        self, query_text: str, candidates: list[ChunkSearchResult]
+    ) -> list[ChunkSearchResult]:
+        self.received = (query_text, candidates)
+        if self._error is not None:
+            raise self._error
+        if self._order is None:
+            return candidates
+        by_file = {c.file_path: c for c in candidates}
+        return [by_file[f] for f in self._order if f in by_file]
+
+
+def test_retrieve_overfetches_when_reranker_given() -> None:
+    store = SpyVectorStore([_result("a.py")])
+    retriever = ProjectContextRetriever(
+        FakeEmbedder(), store, limit=3, reranker=FakeReranker()  # type: ignore[arg-type]
+    )
+
+    retriever.retrieve("find bar")
+
+    assert store.received_limit == 12  # limit(3) * overfetch multiplier(4)
+
+
+def test_retrieve_uses_reranked_order() -> None:
+    store = SpyVectorStore([_result("a.py"), _result("b.py")])
+    reranker = FakeReranker(order=["b.py", "a.py"])
+    retriever = ProjectContextRetriever(
+        FakeEmbedder(), store, reranker=reranker  # type: ignore[arg-type]
+    )
+
+    results = retriever.retrieve("find bar")
+
+    assert [r.file_path for r in results] == ["b.py", "a.py"]
+    assert reranker.received is not None
+    assert reranker.received[0] == "find bar"
+
+
+def test_retrieve_falls_back_to_embedding_order_when_reranker_fails() -> None:
+    store = SpyVectorStore([_result("a.py"), _result("b.py")])
+    reranker = FakeReranker(error=RuntimeError("model not loaded"))
+    retriever = ProjectContextRetriever(
+        FakeEmbedder(), store, reranker=reranker  # type: ignore[arg-type]
+    )
+
+    results = retriever.retrieve("find bar")
+
+    assert [r.file_path for r in results] == ["a.py", "b.py"]
+
+
+def test_retrieve_passes_already_filtered_candidates_to_reranker() -> None:
+    # min_score 미달(c.py)과 exclude_file_path(a.py)는 reranker에 아예 전달되면 안 된다 —
+    # cross-encoder 추론을 이미 걸러진 후보에만 돌리기 위한 필터 순서 계약을 고정한다.
+    store = SpyVectorStore(
+        [_result("a.py", score=0.9), _result("b.py", score=0.9), _result("c.py", score=0.1)]
+    )
+    reranker = FakeReranker()
+    retriever = ProjectContextRetriever(
+        FakeEmbedder(), store, min_score=0.5, reranker=reranker  # type: ignore[arg-type]
+    )
+
+    retriever.retrieve("find bar", exclude_file_path="a.py")
+
+    assert reranker.received is not None
+    assert [c.file_path for c in reranker.received[1]] == ["b.py"]
+
+
+def test_retrieve_truncates_reranked_results_to_limit() -> None:
+    store = SpyVectorStore([_result("a.py"), _result("b.py"), _result("c.py")])
+    reranker = FakeReranker(order=["c.py", "b.py", "a.py"])
+    retriever = ProjectContextRetriever(
+        FakeEmbedder(), store, limit=1, reranker=reranker  # type: ignore[arg-type]
+    )
+
+    results = retriever.retrieve("find bar")
+
+    assert [r.file_path for r in results] == ["c.py"]

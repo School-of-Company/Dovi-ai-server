@@ -68,15 +68,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from qdrant_client import QdrantClient
 
         from app.rag.embeddings import CodeRankEmbedClient
+        from app.rag.reranker import CrossEncoderReranker
         from app.rag.retriever import ProjectContextRetriever
         from app.rag.vector_store import QdrantVectorStore
 
         embedder = CodeRankEmbedClient(settings.embedding_model)
+        reranker = CrossEncoderReranker(settings.reranker_model)
         qdrant_client = QdrantClient(url=settings.qdrant_url)
         vector_store = QdrantVectorStore(
             qdrant_client, settings.rag_collection_name, vector_size=embedder.dimension
         )
-        retriever = ProjectContextRetriever(embedder, vector_store)
+        retriever = ProjectContextRetriever(embedder, vector_store, reranker=reranker)
 
     pipeline = ReviewPipeline(
         llm_client,
