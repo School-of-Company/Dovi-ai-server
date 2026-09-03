@@ -121,8 +121,10 @@ async def test_lifespan_wires_rag_retriever_when_enabled(
         "app.main.create_comment_answer_consumer",
         lambda settings: fake_comment_answer_consumer,
     )
-    monkeypatch.setattr("app.main.CodeRankEmbedClient", lambda model_name: FakeEmbedder())
-    monkeypatch.setattr("app.main.QdrantClient", lambda url: fake_qdrant_client)
+    monkeypatch.setattr(
+        "app.rag.embeddings.CodeRankEmbedClient", lambda model_name: FakeEmbedder()
+    )
+    monkeypatch.setattr("qdrant_client.QdrantClient", lambda url: fake_qdrant_client)
 
     captured_kwargs: dict[str, object] = {}
     original_init = ReviewPipeline.__init__

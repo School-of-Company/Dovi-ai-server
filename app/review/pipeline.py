@@ -6,7 +6,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage, LLMClient
-from app.rag.vector_store import ChunkSearchResult
+from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
