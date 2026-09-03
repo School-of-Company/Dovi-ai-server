@@ -9,6 +9,11 @@ services:
     stop_grace_period: 150s
     depends_on:
       - qdrant
+    volumes:
+      # CodeRankEmbed 등 HuggingFace 모델 가중치 캐시. 마운트 없이는 컨테이너를
+      # 재생성할 때마다(배포마다) 매번 다시 다운로드해야 해서, 다운로드 경로가
+      # 불안정하면(HF CDN 타임아웃 등) 배포 자체가 막힌다.
+      - hf_cache:/root/.cache/huggingface
 
   qdrant:
     image: qdrant/qdrant:v1.15.1
@@ -21,3 +26,4 @@ services:
 
 volumes:
   qdrant_storage:
+  hf_cache:
