@@ -1,3 +1,4 @@
+import pytest
 from qdrant_client import QdrantClient
 
 from app.notion.schema import ApiSpecEntry
@@ -33,6 +34,19 @@ def test_search_does_not_leak_across_repositories() -> None:
 
     assert len(store.search(1, [1.0, 0.0, 0.0], limit=10)) == 1
     assert len(store.search(2, [1.0, 0.0, 0.0], limit=10)) == 1
+
+
+def test_upsert_entries_raises_on_length_mismatch() -> None:
+    store = _store()
+    store.ensure_collection()
+    with pytest.raises(ValueError):
+        store.upsert_entries(1, [_entry()], [])
+
+
+def test_upsert_entries_noop_on_empty_list() -> None:
+    store = _store()
+    store.ensure_collection()
+    store.upsert_entries(1, [], [])  # 에러 없이 통과해야 한다
 
 
 def test_delete_by_repository_removes_only_that_repository() -> None:
