@@ -47,6 +47,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: GHCR_TOKEN,GHCR_ACTOR,IMAGE_TAG
           script: |
+            set -e
             if [ ! -d ~/Dovi-ai-server ]; then
               git clone https://github.com/School-of-Company/Dovi-ai-server.git ~/Dovi-ai-server
             fi
