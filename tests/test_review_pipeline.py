@@ -417,6 +417,38 @@ async def test_run_saves_notion_link_when_no_swagger_present() -> None:
     assert link_store.saved == [(42, "https://notion.so/abc")]
 
 
+async def test_run_survives_notion_link_store_save_failure() -> None:
+    class BoomNotionLinkStore:
+        async def save(self, *, repository_id: int, notion_database_url: str) -> None:
+            raise RuntimeError("redis unreachable")
+
+        async def get(self, *, repository_id: int) -> str | None:
+            return None
+
+        async def list_all(self) -> list[tuple[int, str]]:
+            return []
+
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    event = _event()
+    event.context_files = [
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        )
+    ]
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        notion_link_store=BoomNotionLinkStore(),
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary == "ok"
+
+
 async def test_run_does_not_save_notion_link_when_swagger_present() -> None:
     fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
     link_store = FakeNotionLinkStore()
