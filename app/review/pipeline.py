@@ -24,6 +24,65 @@ from app.review.schema import (
 
 logger = logging.getLogger(__name__)
 
+# build_context()의 max_file_chars/max_total_chars와 동일한 값을 재사용한다.
+# 새 파일 하나가 통째로(예: 1300줄짜리 markdown) diff에 들어가면 LLM_MAX_CONTEXT를
+# 넘겨 llama-server가 요청을 거부하고 server_error로 조용히 실패하는 문제가 있었다
+# (PR #66에서 실제로 발생 — github-app은 실패 시 PR에 아무것도 남기지 않는다).
+# diff와 build_context()의 project context는 같은 프롬프트를 나눠 쓰므로, 둘을
+# 각자 20000자씩 독립적으로 자르면 합쳐서 40000자까지 나갈 수 있다 — 실제로 항상
+# 지켜야 하는 건 "둘을 합쳐서" 20000자이므로, context가 이미 소비한 만큼을 diff
+# 예산에서 뺀다 (review-agent 지적).
+_MAX_DIFF_FILE_CHARS = 8000
+_MAX_DIFF_TOTAL_CHARS = 20000
+
+# 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
+# summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
+# 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
+_SUSPICIOUS_SUMMARY_LENGTH = 400
+
+
+def _truncate_diff_blocks(
+    blocks: list[str],
+    *,
+    max_file_chars: int = _MAX_DIFF_FILE_CHARS,
+    max_total_chars: int = _MAX_DIFF_TOTAL_CHARS,
+) -> str:
+    truncated: list[str] = []
+    total = 0
+    for i, block in enumerate(blocks):
+        remaining = max_total_chars - total
+        if remaining <= 0:
+            logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+            break
+
+        limit = min(max_file_chars, remaining)
+        if len(block) > limit:
+            trunc_msg = "\n...(truncated)"
+            if limit < len(trunc_msg):
+                logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+                break
+            content_limit = limit - len(trunc_msg)
+            # 코드 한 줄이 반토막 나면 LLM이 실제로 없는 문법 오류로 착각할 수 있으니,
+            # 가능하면 줄 경계에서 자른다 (경계를 못 찾으면 문자 단위로 그냥 자름).
+            cut = block.rfind("\n", 0, content_limit)
+            if cut == -1 or cut < content_limit // 2:
+                cut = content_limit
+            # limit이 max_file_chars가 아니라 remaining(공유 예산 소진)에 걸린
+            # 경우도 있으므로, 실제로 적용된 한도가 뭔지 로그에 정확히 남긴다.
+            if limit == max_file_chars:
+                logger.warning("diff truncated: file exceeded %d chars", max_file_chars)
+            else:
+                logger.warning(
+                    "diff truncated: shared budget exhausted (%d chars remaining)", remaining
+                )
+            block = block[:cut] + trunc_msg
+
+        truncated.append(block)
+        total += len(block)
+
+    return "\n\n".join(truncated)
+
+
 _SYSTEM_PROMPT = (
     "You are a code review assistant. Review the diff and report only real, "
     "concrete issues — runtime errors, security/auth problems, API contract "
@@ -40,14 +99,40 @@ _SYSTEM_PROMPT = (
     "reliably and guessing about it only adds noise. Before reporting a "
     "finding about a removed ('-') line, check whether the same hunk's "
     "added ('+') lines already fix or address it — if they do, the finding "
-    "is stale and must not be reported.\n\n"
+    "is stale and must not be reported. Do not flag a renamed method/"
+    "attribute call as a risk merely because the name changed — only "
+    "report it if you have concrete evidence the new name is wrong, "
+    "unavailable, or behaves differently. A finding whose own reasoning "
+    "hedges ('this may be because X or Y', 'please verify') instead of "
+    "stating a concrete failure is not a real finding — omit it.\n\n"
+    "The user message has a `## Project Context` section (README/docs — "
+    "background only) followed by `## Changes` (the actual diff being "
+    "reviewed). `## Project Context` may describe features, functions, or "
+    "files that are planned or exist only in a different, unmerged PR — "
+    "not necessarily anything in this diff or the current codebase. Never "
+    "state in `summary` or any finding that something from `## Project "
+    "Context` was added, implemented, or changed unless `## Changes` "
+    "itself shows it.\n\n"
     "Write `summary`, `title`, `message`, and `suggestedFix` in Korean. "
     "`summary` is posted as the PR's main review comment, so it must be 1-3 "
     "concrete sentences describing what the diff actually does and your "
     "overall assessment — never a bare label like '코드 리뷰 결과' or "
     "'리뷰 완료' with no content. If `reviews` is empty, `summary` must say "
     "so explicitly (e.g. '특이사항이 발견되지 않았습니다'), not just restate "
-    "the diff's file names. `title` must be short (roughly under 40 "
+    "the diff's file names. `summary` must never describe a specific "
+    "code-level concern, risk, or suggestion in prose. `severity` reflects "
+    "actual impact (critical/major for real bugs, security/auth problems, "
+    "or API/data-consistency breaks; minor/suggestion for lower-impact "
+    "style or robustness notes) — it is never a proxy for how sure you "
+    "are. If you are at least 50% confident a concern is real "
+    "(`confidence >= 0.5`), it MUST be its own entry in `reviews[]` — "
+    "with the file/line, evidence, and whichever severity actually "
+    "matches its impact — never described only in `summary`. If you are "
+    "less than 50% confident, leave it out entirely (don't put it in "
+    "`reviews[]` with a low `confidence`, and don't describe it in "
+    "`summary` either) — findings below `confidence` 0.5 are silently "
+    "dropped everywhere, so a low-confidence entry would never reach "
+    "anyone anyway. `title` must be short (roughly under 40 "
     "characters) and name the exact problem, not a generic phrase like "
     "'개선이 필요합니다'. `message` must be 1-3 concise sentences stating "
     "what breaks and why — not a general description of what the file "
@@ -81,8 +166,12 @@ _VERIFY_SYSTEM_PROMPT = (
     "handler (used for a documented fallback) as a bug; flagging code that "
     "already has an equivalent safety check nearby; a finding on a removed "
     "('-') line whose suggested fix is already present in the same hunk's "
-    "added ('+') lines; and suggestions that would themselves violate this "
-    "project's conventions (e.g. logging full request payloads).\n\n"
+    "added ('+') lines; suggestions that would themselves violate this "
+    "project's conventions (e.g. logging full request payloads); and a "
+    "finding whose evidence is just the changed line itself with no "
+    "stated concrete failure mode — hedged reasoning ('this may be...', "
+    "'verify that...') without a specific breakage is not confirmation, "
+    "it's restating the diff.\n\n"
     "For every numbered finding, set `confirmed` to true only if the "
     "described problem is real and `evidence` actually supports it. Give a "
     "one-sentence `reason` either way, and set `index` to the finding's "
@@ -230,6 +319,17 @@ class ReviewPipeline:
         # 상황을 막기 위해 코드 레벨로도 한 번 더 방어한다.
         if not summary.strip():
             summary = "요약 생성에 실패했습니다 (모델 출력이 비어 있음)."
+
+        # "1-3 concrete sentences" 지침을 무시하고 summary에 구체적인 우려사항을
+        # 프로즈로 풀어쓰는 회귀(reviews[]는 비어있는데 summary만 장문인 경우)를
+        # 코드로 강제하긴 어렵지만, 프로덕션에서 재발했는지는 로그로라도 알 수
+        # 있어야 한다. summary가 비정상적으로 긴데 reviews가 비어있으면 의심 신호다.
+        if len(summary) > _SUSPICIOUS_SUMMARY_LENGTH and not reviews:
+            logger.warning(
+                "summary unusually long (%d chars) with no reviews[] entries — "
+                "possible finding leaked into summary prose instead of reviews[]",
+                len(summary),
+            )
 
         # minor/suggestion은 inline comment로 달지 않는 대신, 요약에 한 줄씩 남긴다
         # (노션 20절 "Minor/Suggestion은 summary로만 제공").
@@ -398,10 +498,12 @@ class ReviewPipeline:
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str = "",
     ) -> list[ChatMessage]:
-        diff = "\n\n".join(
+        blocks = [
             self._render_target(t, related_context.get(t.file_path, [])) for t in targets
-        )
+        ]
         context = build_context(event.context_files)
+        diff_budget = max(0, _MAX_DIFF_TOTAL_CHARS - len(context))
+        diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         user += api_spec_context
         return [

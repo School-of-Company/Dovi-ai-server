@@ -1,7 +1,10 @@
+import logging
 import re
 from pathlib import PurePosixPath
 
 from app.review.schema import ContextFile
+
+logger = logging.getLogger(__name__)
 
 _SECRET_EXTENSIONS = {".env", ".pem", ".p8", ".key"}
 _SECRET_KEYWORDS = ("private-key", "private_key")
@@ -79,19 +82,38 @@ def build_context(
 
     blocks: list[str] = []
     total = 0
-    for file in usable:
+    for i, file in enumerate(usable):
         header = f"# {file.path}\n"
         remaining = max_total_chars - total - len(header)
         if remaining <= 0:
+            logger.warning(
+                "project context truncated: dropping %d remaining file(s)", len(usable) - i
+            )
             break
 
         limit = min(max_file_chars, remaining)
         if len(file.content) > limit:
             trunc_msg = "\n...(truncated)"
             if limit < len(trunc_msg):
+                logger.warning(
+                    "project context truncated: dropping %d remaining file(s)", len(usable) - i
+                )
                 break
             content_limit = limit - len(trunc_msg)
             content = file.content[:content_limit] + trunc_msg
+            if limit == max_file_chars:
+                logger.warning(
+                    "project context truncated: file=%s exceeded %d chars",
+                    file.path,
+                    max_file_chars,
+                )
+            else:
+                logger.warning(
+                    "project context truncated: file=%s shared budget exhausted "
+                    "(%d chars remaining)",
+                    file.path,
+                    remaining,
+                )
         else:
             content = file.content
 
