@@ -1,3 +1,4 @@
+import re
 from pathlib import PurePosixPath
 
 from app.review.schema import ContextFile
@@ -7,6 +8,34 @@ _SECRET_KEYWORDS = ("private-key", "private_key")
 
 _MAX_FILE_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
+
+_OPENAPI_FILENAMES = {"openapi.yaml", "openapi.yml", "swagger.json"}
+_NOTION_LINK_PATTERN = re.compile(
+    r"Notion API Spec:\s*(https://(?:www\.)?notion\.so/\S+)", re.IGNORECASE
+)
+
+
+def has_openapi_spec(context_files: list[ContextFile]) -> bool:
+    """swagger/openapi가 이미 있으면 Notion API 명세 fallback을 쓰지 않는다."""
+    return any(
+        PurePosixPath(f.path.lower()).name in _OPENAPI_FILENAMES for f in context_files
+    )
+
+
+def extract_notion_api_spec_link(context_files: list[ContextFile]) -> str | None:
+    """DOVI.md의 '## API Specification' 섹션에서 Notion 링크를 찾는다.
+
+    swagger가 있는지 여부는 호출자(review pipeline)가 has_openapi_spec()로 먼저
+    판단해서, 이 함수는 링크 파싱 자체에만 집중한다 (단일 책임).
+    """
+    dovi = next(
+        (f for f in context_files if PurePosixPath(f.path.lower()).name == "dovi.md"),
+        None,
+    )
+    if dovi is None:
+        return None
+    match = _NOTION_LINK_PATTERN.search(dovi.content)
+    return match.group(1) if match else None
 
 
 def _is_secret(path: str) -> bool:
