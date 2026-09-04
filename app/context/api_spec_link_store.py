@@ -44,6 +44,8 @@ class RedisNotionLinkStore:
 
     async def get(self, *, repository_id: int) -> str | None:
         value = await self._redis.get(self._key(repository_id))
+        if isinstance(value, bytes):
+            return value.decode()
         return value if isinstance(value, str) else None
 
     async def list_all(self) -> list[tuple[int, str]]:

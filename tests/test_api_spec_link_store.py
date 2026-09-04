@@ -2,11 +2,14 @@ from app.context.api_spec_link_store import RedisNotionLinkStore
 
 
 class FakeRedis:
+    """실제 redis.asyncio.Redis(decode_responses 미설정)는 bytes를 반환하므로,
+    해당 byte-vs-str 경계를 테스트가 실제로 검증하도록 bytes로 저장/반환한다."""
+
     def __init__(self) -> None:
-        self.store: dict[str, str] = {}
+        self.store: dict[str, bytes] = {}
 
     async def set(self, name: str, value: str, nx: bool = False, ex: int | None = None) -> object:
-        self.store[name] = value
+        self.store[name] = value.encode()
         return True
 
     async def get(self, name: str) -> object:
@@ -19,7 +22,7 @@ class FakeRedis:
 
     async def keys(self, pattern: str) -> object:
         import fnmatch
-        return [k for k in self.store.keys() if fnmatch.fnmatch(k, pattern)]
+        return [k.encode() for k in self.store.keys() if fnmatch.fnmatch(k, pattern)]
 
 
 async def test_save_and_get_link() -> None:
