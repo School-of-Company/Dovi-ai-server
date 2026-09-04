@@ -22,6 +22,60 @@ from app.review.schema import (
 
 logger = logging.getLogger(__name__)
 
+# build_context()의 max_file_chars/max_total_chars와 동일한 값을 재사용한다.
+# 새 파일 하나가 통째로(예: 1300줄짜리 markdown) diff에 들어가면 LLM_MAX_CONTEXT를
+# 넘겨 llama-server가 요청을 거부하고 server_error로 조용히 실패하는 문제가 있었다
+# (PR #66에서 실제로 발생 — github-app은 실패 시 PR에 아무것도 남기지 않는다).
+# diff와 build_context()의 project context는 같은 프롬프트를 나눠 쓰므로, 둘을
+# 각자 20000자씩 독립적으로 자르면 합쳐서 40000자까지 나갈 수 있다 — 실제로 항상
+# 지켜야 하는 건 "둘을 합쳐서" 20000자이므로, context가 이미 소비한 만큼을 diff
+# 예산에서 뺀다 (review-agent 지적).
+_MAX_DIFF_FILE_CHARS = 8000
+_MAX_DIFF_TOTAL_CHARS = 20000
+
+
+def _truncate_diff_blocks(
+    blocks: list[str],
+    *,
+    max_file_chars: int = _MAX_DIFF_FILE_CHARS,
+    max_total_chars: int = _MAX_DIFF_TOTAL_CHARS,
+) -> str:
+    truncated: list[str] = []
+    total = 0
+    for i, block in enumerate(blocks):
+        remaining = max_total_chars - total
+        if remaining <= 0:
+            logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+            break
+
+        limit = min(max_file_chars, remaining)
+        if len(block) > limit:
+            trunc_msg = "\n...(truncated)"
+            if limit < len(trunc_msg):
+                logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+                break
+            content_limit = limit - len(trunc_msg)
+            # 코드 한 줄이 반토막 나면 LLM이 실제로 없는 문법 오류로 착각할 수 있으니,
+            # 가능하면 줄 경계에서 자른다 (경계를 못 찾으면 문자 단위로 그냥 자름).
+            cut = block.rfind("\n", 0, content_limit)
+            if cut == -1 or cut < content_limit // 2:
+                cut = content_limit
+            # limit이 max_file_chars가 아니라 remaining(공유 예산 소진)에 걸린
+            # 경우도 있으므로, 실제로 적용된 한도가 뭔지 로그에 정확히 남긴다.
+            if limit == max_file_chars:
+                logger.warning("diff truncated: file exceeded %d chars", max_file_chars)
+            else:
+                logger.warning(
+                    "diff truncated: shared budget exhausted (%d chars remaining)", remaining
+                )
+            block = block[:cut] + trunc_msg
+
+        truncated.append(block)
+        total += len(block)
+
+    return "\n\n".join(truncated)
+
+
 _SYSTEM_PROMPT = (
     "You are a code review assistant. Review the diff and report only real, "
     "concrete issues — runtime errors, security/auth problems, API contract "
@@ -333,10 +387,12 @@ class ReviewPipeline:
         targets: list[ReviewTarget],
         related_context: dict[str, list[ChunkSearchResult]],
     ) -> list[ChatMessage]:
-        diff = "\n\n".join(
+        blocks = [
             self._render_target(t, related_context.get(t.file_path, [])) for t in targets
-        )
+        ]
         context = build_context(event.context_files)
+        diff_budget = max(0, _MAX_DIFF_TOTAL_CHARS - len(context))
+        diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
