@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
+from app.rag.api_spec_vector_store import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import (
@@ -139,6 +140,16 @@ class FakeNotionLinkStore:
 
     async def list_all(self) -> list[tuple[int, str]]:
         return []
+
+
+class FakeApiSpecRetriever:
+    def __init__(self, results: list[ApiSpecSearchResult]) -> None:
+        self.results = results
+        self.received: tuple[str, int] | None = None
+
+    def retrieve(self, query_text: str, repository_id: int) -> list[ApiSpecSearchResult]:
+        self.received = (query_text, repository_id)
+        return self.results
 
 
 def test_make_review_job_id() -> None:
@@ -467,6 +478,63 @@ async def test_run_does_not_save_notion_link_when_swagger_present() -> None:
     await pipeline.run(event)
 
     assert link_store.saved == []
+
+
+async def test_run_includes_api_spec_when_no_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    api_spec_retriever = FakeApiSpecRetriever(
+        [
+            ApiSpecSearchResult(
+                method="GET",
+                path="/api/x",
+                summary="s",
+                request_schema="",
+                response_schema="",
+                auth="",
+                score=0.9,
+            )
+        ]
+    )
+    event = _event()  # context_files에 openapi/swagger 없음
+
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", api_spec_retriever=api_spec_retriever
+    )
+    await pipeline.run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 API 명세" in user_message
+    assert "GET /api/x" in user_message
+
+
+async def test_run_skips_api_spec_when_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    api_spec_retriever = FakeApiSpecRetriever(
+        [
+            ApiSpecSearchResult(
+                method="GET",
+                path="/api/x",
+                summary="s",
+                request_schema="",
+                response_schema="",
+                auth="",
+                score=0.9,
+            )
+        ]
+    )
+    event = _event()
+    event.context_files = [ContextFile(path="openapi.yaml", content="...")]
+
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", api_spec_retriever=api_spec_retriever
+    )
+    await pipeline.run(event)
+
+    assert api_spec_retriever.received is None
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 API 명세" not in user_message
 
 
 @pytest.mark.parametrize("reviews", [[], None])
