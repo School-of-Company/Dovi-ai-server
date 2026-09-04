@@ -63,7 +63,7 @@ class CodeRankEmbedClient:
 
     @property
     def dimension(self) -> int:
-        dim = self._get_model().get_sentence_embedding_dimension()
+        dim = self._get_model().get_embedding_dimension()
         if dim is None:
             raise RuntimeError(f"model {self._model_name} did not report an embedding dimension")
         return dim
