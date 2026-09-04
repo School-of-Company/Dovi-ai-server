@@ -55,6 +55,20 @@ def _is_secret(path: str) -> bool:
     return False
 
 
+# docs/superpowers/{plans,specs}는 SDD 워크플로우가 남기는 "이 기능을 어떻게
+# 만들지"에 대한 계획/설계 문서다 — "이 레포 코드가 지금 어떻게 동작하는지"에
+# 대한 참고 자료가 아니다. 리뷰 대상 diff가 빈약할 때(예: YAML/셸 스크립트 몇
+# 줄) LLM이 이 문서에 적힌 계획 중인 함수/파일명을 실제 diff에서 구현된 것으로
+# 착각해 summary에 써버리는 사고가 실제로 재발했다 (프롬프트 지침만으로는
+# 확실히 막히지 않음) — 아예 리뷰 컨텍스트 후보에서 제외한다.
+_EXCLUDED_PREFIXES = ("docs/superpowers/",)
+
+
+def _is_excluded(path: str) -> bool:
+    lowered = path.lower()
+    return any(lowered.startswith(prefix) for prefix in _EXCLUDED_PREFIXES)
+
+
 def _priority(path: str) -> int:
     lowered = path.lower()
     name = PurePosixPath(lowered).name
@@ -77,7 +91,9 @@ def build_context(
     max_file_chars: int = _MAX_FILE_CHARS,
     max_total_chars: int = _MAX_TOTAL_CHARS,
 ) -> str:
-    usable = [f for f in context_files if not _is_secret(f.path)]
+    usable = [
+        f for f in context_files if not _is_secret(f.path) and not _is_excluded(f.path)
+    ]
     usable.sort(key=lambda f: _priority(f.path))
 
     blocks: list[str] = []

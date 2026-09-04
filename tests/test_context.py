@@ -46,6 +46,26 @@ def test_excludes_secret_paths() -> None:
     assert "# DOVI.md" in result
 
 
+def test_excludes_sdd_planning_docs() -> None:
+    files = [
+        ContextFile(
+            path="docs/superpowers/plans/2026-09-04-notion-api-spec-sync-plan.md",
+            content="has_openapi_spec / extract_notion_api_spec_link plan",
+        ),
+        ContextFile(
+            path="docs/superpowers/specs/2026-09-04-notion-api-spec-sync-design.md",
+            content="api_spec_link_store design",
+        ),
+        ContextFile(path="docs/guide.md", content="normal docs content"),
+        ContextFile(path="DOVI.md", content="dovi"),
+    ]
+    result = build_context(files)
+    assert "has_openapi_spec" not in result
+    assert "api_spec_link_store" not in result
+    assert "docs/superpowers" not in result
+    assert "normal docs content" in result
+
+
 def test_truncates_large_file() -> None:
     files = [ContextFile(path="DOVI.md", content="x" * 10000)]
     result = build_context(files, max_file_chars=100)
