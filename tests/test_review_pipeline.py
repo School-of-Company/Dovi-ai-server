@@ -6,6 +6,7 @@ from app.rag.schema import ChunkSearchResult
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import (
     ChangedFile,
+    ContextFile,
     ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
@@ -124,6 +125,20 @@ class FakeRetriever:
     ) -> list[ChunkSearchResult]:
         self.received_queries.append((query_text, repository_id, exclude_file_path))
         return self.results
+
+
+class FakeNotionLinkStore:
+    def __init__(self) -> None:
+        self.saved: list[tuple[int, str]] = []
+
+    async def save(self, *, repository_id: int, notion_database_url: str) -> None:
+        self.saved.append((repository_id, notion_database_url))
+
+    async def get(self, *, repository_id: int) -> str | None:
+        return None
+
+    async def list_all(self) -> list[tuple[int, str]]:
+        return []
 
 
 def test_make_review_job_id() -> None:
@@ -381,6 +396,45 @@ async def test_run_returns_failed_on_server_error() -> None:
     assert isinstance(result, ReviewFailedEvent)
     assert result.reason == "server_error"
     assert fake.call_count == 2  # 1회 재시도 후 실패
+
+
+async def test_run_saves_notion_link_when_no_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    link_store = FakeNotionLinkStore()
+    event = _event()
+    event.context_files = [
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        )
+    ]
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", notion_link_store=link_store
+    )
+
+    await pipeline.run(event)
+
+    assert link_store.saved == [(42, "https://notion.so/abc")]
+
+
+async def test_run_does_not_save_notion_link_when_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    link_store = FakeNotionLinkStore()
+    event = _event()
+    event.context_files = [
+        ContextFile(path="openapi.yaml", content="..."),
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        ),
+    ]
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", notion_link_store=link_store
+    )
+
+    await pipeline.run(event)
+
+    assert link_store.saved == []
 
 
 @pytest.mark.parametrize("reviews", [[], None])

@@ -5,9 +5,10 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from app.context.api_spec_link_store import NotionLinkStore
 from app.llm.client import ChatMessage, LLMClient
 from app.rag.schema import ChunkSearchResult
-from app.review.context import build_context
+from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
@@ -129,6 +130,7 @@ class ReviewPipeline:
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
         retriever: ContextRetriever | None = None,
+        notion_link_store: NotionLinkStore | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
@@ -136,11 +138,13 @@ class ReviewPipeline:
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
         self._retriever = retriever
+        self._notion_link_store = notion_link_store
 
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
         targets = analyze(event)
+        await self._maybe_save_notion_link(event)
         if not targets:
             return self._completed(event, "No reviewable changes found.", [])
 
@@ -302,6 +306,26 @@ class ReviewPipeline:
             head_sha=event.head_sha,
             reason=reason,
         )
+
+    async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
+        """swagger가 없고 DOVI.md에 Notion API 명세 링크가 있으면 저장해 둔다.
+
+        저장된 링크는 sync_api_spec.py가 나중에 읽어 Notion을 동기화한다 — PR
+        리뷰 시점엔 Notion을 직접 조회하지 않는다는 설계 원칙(7.3절)을 따른다.
+        """
+        if self._notion_link_store is None:
+            return
+        if has_openapi_spec(event.context_files):
+            return
+        link = extract_notion_api_spec_link(event.context_files)
+        if link is None:
+            return
+        try:
+            await self._notion_link_store.save(
+                repository_id=event.repository_id, notion_database_url=link
+            )
+        except Exception:
+            logger.warning("failed to save notion api spec link", exc_info=True)
 
     async def _retrieve_related_context(
         self, repository_id: int, targets: list[ReviewTarget]
