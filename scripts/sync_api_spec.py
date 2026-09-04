@@ -48,16 +48,24 @@ async def sync_all(
     vector_store.ensure_collection()
     total = 0
     for repository_id, database_url in await link_store.list_all():
-        database_id = database_url.rstrip("/").split("/")[-1]
-        entries = await notion_client.query_database(database_id)
-        vector_store.delete_by_repository(repository_id)
-        if not entries:
-            logger.info("no api spec entries repository_id=%s", repository_id)
+        try:
+            database_id = database_url.rstrip("/").split("/")[-1]
+            entries = await notion_client.query_database(database_id)
+            vector_store.delete_by_repository(repository_id)
+            if not entries:
+                logger.info("no api spec entries repository_id=%s", repository_id)
+                continue
+            vectors = embedder.embed_documents([entry.to_text() for entry in entries])
+            vector_store.upsert_entries(repository_id, entries, vectors)
+            total += len(entries)
+            logger.info(
+                "synced repository_id=%s entries=%d", repository_id, len(entries)
+            )
+        except Exception:
+            logger.warning(
+                "failed to sync repository_id=%s", repository_id, exc_info=True
+            )
             continue
-        vectors = embedder.embed_documents([entry.to_text() for entry in entries])
-        vector_store.upsert_entries(repository_id, entries, vectors)
-        total += len(entries)
-        logger.info("synced repository_id=%s entries=%d", repository_id, len(entries))
     return total
 
 
