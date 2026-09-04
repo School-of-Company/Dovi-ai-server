@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from app.rag.api_spec_vector_store import ApiSpecSearchResult, ApiSpecVectorStore
+from app.rag.api_spec_schema import ApiSpecSearchResult
+from app.rag.api_spec_vector_store import ApiSpecVectorStore
 from app.rag.embeddings import Embedder
 
 logger = logging.getLogger(__name__)

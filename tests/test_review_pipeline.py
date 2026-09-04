@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
-from app.rag.api_spec_vector_store import ApiSpecSearchResult
+from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import (

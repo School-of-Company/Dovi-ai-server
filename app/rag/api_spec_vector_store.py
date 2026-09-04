@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -16,6 +15,7 @@ from qdrant_client.http.models import (
 )
 
 from app.notion.schema import ApiSpecEntry
+from app.rag.api_spec_schema import ApiSpecSearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +25,6 @@ _POINT_ID_NAMESPACE = uuid.UUID("9f1c1a3e-2b7d-4e6a-8c3f-1a2b3c4d5e6f")
 def _point_id(repository_id: int, entry: ApiSpecEntry) -> str:
     key = f"{repository_id}:{entry.method}:{entry.path}"
     return str(uuid.uuid5(_POINT_ID_NAMESPACE, key))
-
-
-@dataclass
-class ApiSpecSearchResult:
-    method: str
-    path: str
-    summary: str
-    request_schema: str
-    response_schema: str
-    auth: str
-    score: float
 
 
 class ApiSpecVectorStore:

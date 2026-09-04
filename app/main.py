@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     qdrant_client = None
     retriever = None
+    api_spec_retriever = None
     if settings.rag_enabled:
         # qdrant-client는 numpy를 끌어오는데, 이를 지원 안 하는 CPU에서는 import만
         # 해도 죽는다(RAG를 안 켜는 배포에까지 그 위험을 지우지 않도록 지연 import).
@@ -80,11 +81,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         retriever = ProjectContextRetriever(embedder, vector_store, reranker=reranker)
 
+        # API 명세 검색은 RAG 인프라(embedder/qdrant_client)가 이미 있어야 의미가
+        # 있으므로 rag_enabled 조건 안에서만 notion_sync_enabled를 추가로 확인한다.
+        if settings.notion_sync_enabled:
+            from app.context.api_spec_retriever import ApiSpecRetriever
+            from app.rag.api_spec_vector_store import ApiSpecVectorStore
+
+            api_spec_vector_store = ApiSpecVectorStore(
+                qdrant_client, settings.api_spec_collection_name, vector_size=embedder.dimension
+            )
+            api_spec_retriever = ApiSpecRetriever(embedder, api_spec_vector_store)
+
+    # notion_link_store가 redis_client를 필요로 하므로 pipeline 생성보다 먼저 만든다.
+    redis_client = create_redis_client(settings)
+
+    notion_link_store = None
+    if settings.notion_sync_enabled:
+        from app.context.api_spec_link_store import RedisNotionLinkStore
+
+        # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
+        # 완전히 일치하지 않지만, set/get/keys를 문자열 인자로만 호출하므로 런타임에는 호환된다.
+        notion_link_store = RedisNotionLinkStore(redis_client)  # type: ignore[arg-type]
+
     pipeline = ReviewPipeline(
         llm_client,
         model_version=settings.llm_model,
         prompt_version="v1",
         retriever=retriever,
+        api_spec_retriever=api_spec_retriever,
+        notion_link_store=notion_link_store,
     )
 
     comment_answer_pipeline = CommentAnswerPipeline(llm_client)
@@ -96,7 +121,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await kafka_consumer.start()
     await comment_answer_kafka_consumer.start()
 
-    redis_client = create_redis_client(settings)
     # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
     # 완전히 일치하지 않지만, set/get/delete를 문자열 인자로만 호출하므로 런타임에는 호환된다.
     dedup_store = create_dedup_store(settings, redis_client)  # type: ignore[arg-type]

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.context.api_spec_link_store import NotionLinkStore
 from app.llm.client import ChatMessage, LLMClient
-from app.rag.api_spec_vector_store import ApiSpecSearchResult
+from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze

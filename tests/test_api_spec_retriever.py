@@ -1,5 +1,5 @@
 from app.context.api_spec_retriever import ApiSpecRetriever
-from app.rag.api_spec_vector_store import ApiSpecSearchResult
+from app.rag.api_spec_schema import ApiSpecSearchResult
 
 
 class FakeEmbedder:
