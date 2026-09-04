@@ -11,6 +11,7 @@ PR 리뷰 요청 처리 경로에서는 이 스크립트를 호출하지 않는�
 
 import asyncio
 import logging
+import re
 from typing import Protocol
 
 from qdrant_client import QdrantClient
@@ -24,6 +25,20 @@ from app.rag.embeddings import CodeRankEmbedClient, Embedder
 from app.review.dedup import create_redis_client  # 기존 redis client factory 재사용
 
 logger = logging.getLogger(__name__)
+
+# 실제 Notion "Copy link" URL은
+# https://www.notion.so/<workspace>/API-Spec-<32hex>?v=<view_id> 형태로,
+# 사람이 읽는 title slug 접두사와 쿼리스트링이 붙는다. 32자리 hex(대시 포함/미포함
+# UUID 형식)를 URL 어디서든 찾아내 실제 database/page id만 추출한다.
+_NOTION_ID_PATTERN = re.compile(
+    r"([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _extract_database_id(database_url: str) -> str | None:
+    match = _NOTION_ID_PATTERN.search(database_url)
+    return match.group(1).replace("-", "") if match else None
 
 
 class NotionQueryClient(Protocol):
@@ -49,12 +64,23 @@ async def sync_all(
     total = 0
     for repository_id, database_url in await link_store.list_all():
         try:
-            database_id = database_url.rstrip("/").split("/")[-1]
-            entries = await notion_client.query_database(database_id)
-            vector_store.delete_by_repository(repository_id)
-            if not entries:
-                logger.info("no api spec entries repository_id=%s", repository_id)
+            database_id = _extract_database_id(database_url)
+            if database_id is None:
+                logger.warning(
+                    "could not extract notion database id repository_id=%s url=%s",
+                    repository_id,
+                    database_url,
+                )
                 continue
+            entries = await notion_client.query_database(database_id)
+            if not entries:
+                # Notion 조회 실패(5xx/timeout/rate limit/권한 만료 등)도 여기서
+                # 빈 리스트로 관측된다 — 기존 Qdrant 데이터를 지우기 전에 반드시
+                # 이 분기를 먼저 통과시켜, 일시 장애로 기존 데이터가 삭제되지
+                # 않도록 한다.
+                logger.warning("no api spec entries repository_id=%s", repository_id)
+                continue
+            vector_store.delete_by_repository(repository_id)
             vectors = embedder.embed_documents([entry.to_text() for entry in entries])
             vector_store.upsert_entries(repository_id, entries, vectors)
             total += len(entries)
