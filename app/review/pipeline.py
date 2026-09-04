@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 _MAX_DIFF_FILE_CHARS = 8000
 _MAX_DIFF_TOTAL_CHARS = 20000
 
+# 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
+# summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
+# 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
+_SUSPICIOUS_SUMMARY_LENGTH = 400
+
 
 def _truncate_diff_blocks(
     blocks: list[str],
@@ -99,7 +104,20 @@ _SYSTEM_PROMPT = (
     "overall assessment — never a bare label like '코드 리뷰 결과' or "
     "'리뷰 완료' with no content. If `reviews` is empty, `summary` must say "
     "so explicitly (e.g. '특이사항이 발견되지 않았습니다'), not just restate "
-    "the diff's file names. `title` must be short (roughly under 40 "
+    "the diff's file names. `summary` must never describe a specific "
+    "code-level concern, risk, or suggestion in prose. `severity` reflects "
+    "actual impact (critical/major for real bugs, security/auth problems, "
+    "or API/data-consistency breaks; minor/suggestion for lower-impact "
+    "style or robustness notes) — it is never a proxy for how sure you "
+    "are. If you are at least 50% confident a concern is real "
+    "(`confidence >= 0.5`), it MUST be its own entry in `reviews[]` — "
+    "with the file/line, evidence, and whichever severity actually "
+    "matches its impact — never described only in `summary`. If you are "
+    "less than 50% confident, leave it out entirely (don't put it in "
+    "`reviews[]` with a low `confidence`, and don't describe it in "
+    "`summary` either) — findings below `confidence` 0.5 are silently "
+    "dropped everywhere, so a low-confidence entry would never reach "
+    "anyone anyway. `title` must be short (roughly under 40 "
     "characters) and name the exact problem, not a generic phrase like "
     "'개선이 필요합니다'. `message` must be 1-3 concise sentences stating "
     "what breaks and why — not a general description of what the file "
@@ -265,6 +283,17 @@ class ReviewPipeline:
         # 상황을 막기 위해 코드 레벨로도 한 번 더 방어한다.
         if not summary.strip():
             summary = "요약 생성에 실패했습니다 (모델 출력이 비어 있음)."
+
+        # "1-3 concrete sentences" 지침을 무시하고 summary에 구체적인 우려사항을
+        # 프로즈로 풀어쓰는 회귀(reviews[]는 비어있는데 summary만 장문인 경우)를
+        # 코드로 강제하긴 어렵지만, 프로덕션에서 재발했는지는 로그로라도 알 수
+        # 있어야 한다. summary가 비정상적으로 긴데 reviews가 비어있으면 의심 신호다.
+        if len(summary) > _SUSPICIOUS_SUMMARY_LENGTH and not reviews:
+            logger.warning(
+                "summary unusually long (%d chars) with no reviews[] entries — "
+                "possible finding leaked into summary prose instead of reviews[]",
+                len(summary),
+            )
 
         # minor/suggestion은 inline comment로 달지 않는 대신, 요약에 한 줄씩 남긴다
         # (노션 20절 "Minor/Suggestion은 summary로만 제공").

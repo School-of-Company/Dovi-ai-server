@@ -363,6 +363,60 @@ async def test_run_replaces_empty_summary_with_fallback() -> None:
     assert "요약 생성에 실패했습니다" in result.summary
 
 
+async def test_run_logs_warning_when_long_summary_has_no_reviews(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # reviews[]는 비었는데 summary만 비정상적으로 길면, finding이 reviews[]
+    # 대신 summary 프로즈에 새어 들어갔을 가능성이 있다는 관측 신호를 남긴다.
+    long_summary = "x" * 500
+    fake = FakeLLM(output=ReviewModelOutput(summary=long_summary, reviews=[]))
+
+    with caplog.at_level("WARNING"):
+        await _pipeline(fake).run(_event())
+
+    assert any("summary unusually long" in record.message for record in caplog.records)
+
+
+async def test_run_does_not_warn_for_normal_short_summary_with_no_reviews(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 가장 흔한 정상 케이스: 발견사항이 없어서 reviews도 비고 summary도 짧은 경우.
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="특이사항이 발견되지 않았습니다.", reviews=[])
+    )
+
+    with caplog.at_level("WARNING"):
+        await _pipeline(fake).run(_event())
+
+    assert not any("summary unusually long" in record.message for record in caplog.records)
+
+
+async def test_run_does_not_warn_at_exact_length_boundary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 정확히 임계값(400자)이면 "초과"가 아니므로 경고가 뜨면 안 된다.
+    exact_summary = "x" * 400
+    fake = FakeLLM(output=ReviewModelOutput(summary=exact_summary, reviews=[]))
+
+    with caplog.at_level("WARNING"):
+        await _pipeline(fake).run(_event())
+
+    assert not any("summary unusually long" in record.message for record in caplog.records)
+
+
+async def test_run_does_not_warn_when_long_summary_has_reviews(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    long_summary = "x" * 500
+    reviews = [_comment(severity="critical", line=1, title="real bug")]
+    fake = FakeLLM(output=ReviewModelOutput(summary=long_summary, reviews=reviews))
+
+    with caplog.at_level("WARNING"):
+        await _pipeline(fake).run(_event())
+
+    assert not any("summary unusually long" in record.message for record in caplog.records)
+
+
 async def test_run_drops_disputed_findings() -> None:
     reviews = [
         _comment(severity="critical", line=1, title="real bug"),
