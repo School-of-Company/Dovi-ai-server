@@ -3,9 +3,10 @@ from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
 from app.rag.schema import ChunkSearchResult
-from app.review.pipeline import ReviewPipeline
+from app.review.pipeline import ReviewPipeline, _truncate_diff_blocks
 from app.review.schema import (
     ChangedFile,
+    ContextFile,
     ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
@@ -217,6 +218,88 @@ async def test_run_includes_ast_context_chunk_when_content_available() -> None:
     user_message = fake.received[1]["content"]
     assert "전체 함수/클래스 컨텍스트" in user_message
     assert "def foo():" in user_message
+
+
+def test_truncate_diff_blocks_truncates_a_single_block_over_file_limit() -> None:
+    huge_block = "x" * 9000
+
+    result = _truncate_diff_blocks([huge_block], max_file_chars=8000, max_total_chars=20000)
+
+    assert len(result) <= 8000
+    assert result.endswith("...(truncated)")
+
+
+def test_truncate_diff_blocks_leaves_small_blocks_untouched() -> None:
+    blocks = ["small block a", "small block b"]
+
+    result = _truncate_diff_blocks(blocks, max_file_chars=8000, max_total_chars=20000)
+
+    assert result == "small block a\n\nsmall block b"
+
+
+def test_truncate_diff_blocks_drops_later_blocks_once_total_limit_reached() -> None:
+    blocks = ["a" * 7000, "b" * 7000, "c" * 7000, "d" * 7000]
+
+    result = _truncate_diff_blocks(blocks, max_file_chars=8000, max_total_chars=20000)
+
+    assert "a" * 7000 in result
+    assert "b" * 7000 in result
+    assert "d" * 7000 not in result
+    assert len(result) <= 20000 + len("\n...(truncated)") * 4  # 마커 여유분
+
+
+async def test_run_truncates_huge_single_new_file_diff() -> None:
+    # PR #66에서 실제로 발생한 시나리오: 1300줄짜리 새 markdown 파일 하나가 diff로
+    # 통째로 들어오면 LLM_MAX_CONTEXT를 넘겨 server_error로 조용히 실패했다.
+    huge_patch = "@@ -0,0 +1,2000 @@\n" + "\n".join(f"+line {i}" for i in range(2000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="docs/huge.md", status="added", patch=huge_patch)
+        ],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    result = await _pipeline(fake).run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert len(user_message) < len(huge_patch)
+    assert "...(truncated)" in user_message
+
+
+async def test_run_shares_diff_budget_with_project_context() -> None:
+    # context와 diff를 각자 독립적으로 20000자씩 자르면 합쳐서 40000자까지 나갈 수
+    # 있다 — 실제로 지켜야 하는 건 "둘을 합쳐서" 20000자다 (review-agent 지적).
+    large_context_content = "line\n" * 3000  # 15000자
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        context_files=[ContextFile(path="DOVI.md", content=large_context_content)],
+        changed_files=[
+            ChangedFile(file_path="docs/huge.md", status="added", patch=huge_patch)
+        ],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    # 헤더 라벨("## Project Context"/"## Changes")과 잘림 마커 정도의 여유만 두고,
+    # context+diff 합계가 대략 20000자 안쪽이어야 한다 (context 혼자 20000, diff
+    # 혼자 20000까지 각각 허용되던 예전 동작이었다면 최대 40000까지 나갔을 것).
+    assert len(user_message) < 20500
+    assert "...(truncated)" in user_message
 
 
 async def test_run_includes_related_project_code_from_retriever() -> None:
