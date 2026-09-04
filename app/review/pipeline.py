@@ -5,9 +5,11 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from app.context.api_spec_link_store import NotionLinkStore
 from app.llm.client import ChatMessage, LLMClient
+from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
-from app.review.context import build_context
+from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
@@ -208,6 +210,17 @@ class ContextRetriever(Protocol):
         ...
 
 
+class ApiSpecContextRetriever(Protocol):
+    def retrieve(
+        self, query_text: str, repository_id: int
+    ) -> list[ApiSpecSearchResult]:
+        """query_text와 관련된 API 명세를 repository_id 범위 안에서 찾는다.
+
+        실패 시 빈 리스트를 반환한다.
+        """
+        ...
+
+
 class ReviewPipeline:
     def __init__(
         self,
@@ -218,6 +231,8 @@ class ReviewPipeline:
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
         retriever: ContextRetriever | None = None,
+        notion_link_store: NotionLinkStore | None = None,
+        api_spec_retriever: ApiSpecContextRetriever | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
@@ -225,16 +240,20 @@ class ReviewPipeline:
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
         self._retriever = retriever
+        self._notion_link_store = notion_link_store
+        self._api_spec_retriever = api_spec_retriever
 
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
         targets = analyze(event)
+        await self._maybe_save_notion_link(event)
         if not targets:
             return self._completed(event, "No reviewable changes found.", [])
 
         related_context = await self._retrieve_related_context(event.repository_id, targets)
-        messages = self._build_messages(event, targets, related_context)
+        api_spec_context = await self._retrieve_api_spec_context(event, targets)
+        messages = self._build_messages(event, targets, related_context, api_spec_context)
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
         # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
@@ -403,6 +422,26 @@ class ReviewPipeline:
             reason=reason,
         )
 
+    async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
+        """swagger가 없고 DOVI.md에 Notion API 명세 링크가 있으면 저장해 둔다.
+
+        저장된 링크는 sync_api_spec.py가 나중에 읽어 Notion을 동기화한다 — PR
+        리뷰 시점엔 Notion을 직접 조회하지 않는다는 설계 원칙(7.3절)을 따른다.
+        """
+        if self._notion_link_store is None:
+            return
+        if has_openapi_spec(event.context_files):
+            return
+        link = extract_notion_api_spec_link(event.context_files)
+        if link is None:
+            return
+        try:
+            await self._notion_link_store.save(
+                repository_id=event.repository_id, notion_database_url=link
+            )
+        except Exception:
+            logger.warning("failed to save notion api spec link", exc_info=True)
+
     async def _retrieve_related_context(
         self, repository_id: int, targets: list[ReviewTarget]
     ) -> dict[str, list[ChunkSearchResult]]:
@@ -427,11 +466,37 @@ class ReviewPipeline:
             related[target.file_path] = await loop.run_in_executor(None, call)
         return related
 
+    async def _retrieve_api_spec_context(
+        self, event: ReviewRequestedEvent, targets: list[ReviewTarget]
+    ) -> str:
+        """swagger가 없을 때만, PR 전체 diff를 쿼리로 Notion 기반 API 명세를 검색한다.
+
+        target별 관련 코드 검색과 달리 이건 PR 전체 단위 관심사라 target마다
+        반복하지 않고 한 번만 검색한다.
+        """
+        if self._api_spec_retriever is None:
+            return ""
+        if has_openapi_spec(event.context_files):
+            return ""
+        query = "\n".join(hunk for t in targets for hunk in t.hunks)
+        loop = asyncio.get_running_loop()
+        call = functools.partial(self._api_spec_retriever.retrieve, query, event.repository_id)
+        try:
+            results = await loop.run_in_executor(None, call)
+        except Exception:
+            logger.warning("api spec context retrieval failed", exc_info=True)
+            return ""
+        if not results:
+            return ""
+        entries = "\n\n".join(f"{r.method} {r.path}\n{r.summary}" for r in results)
+        return f"\n\n#### 관련 API 명세\n{entries}"
+
     def _build_messages(
         self,
         event: ReviewRequestedEvent,
         targets: list[ReviewTarget],
         related_context: dict[str, list[ChunkSearchResult]],
+        api_spec_context: str = "",
     ) -> list[ChatMessage]:
         blocks = [
             self._render_target(t, related_context.get(t.file_path, [])) for t in targets
@@ -440,6 +505,7 @@ class ReviewPipeline:
         diff_budget = max(0, _MAX_DIFF_TOTAL_CHARS - len(context))
         diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
+        user += api_spec_context
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user},

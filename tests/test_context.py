@@ -62,3 +62,50 @@ def test_total_char_limit() -> None:
     assert "# DOVI.md" in result
     assert "# README.md" in result
     assert "...(truncated)" in result
+
+
+def test_has_openapi_spec_true_for_openapi_yaml() -> None:
+    from app.review.context import has_openapi_spec
+
+    files = [ContextFile(path="openapi.yaml", content="")]
+    assert has_openapi_spec(files) is True
+
+
+def test_has_openapi_spec_true_for_swagger_json() -> None:
+    from app.review.context import has_openapi_spec
+
+    files = [ContextFile(path="swagger.json", content="")]
+    assert has_openapi_spec(files) is True
+
+
+def test_has_openapi_spec_false_when_absent() -> None:
+    from app.review.context import has_openapi_spec
+
+    files = [ContextFile(path="README.md", content="")]
+    assert has_openapi_spec(files) is False
+
+
+def test_extract_notion_api_spec_link_from_dovi_md() -> None:
+    from app.review.context import extract_notion_api_spec_link
+
+    dovi = ContextFile(
+        path="DOVI.md",
+        content="## API Specification\n- Notion API Spec: https://www.notion.so/abcdef1234567890abcdef1234567890\n",
+    )
+    assert (
+        extract_notion_api_spec_link([dovi])
+        == "https://www.notion.so/abcdef1234567890abcdef1234567890"
+    )
+
+
+def test_extract_notion_api_spec_link_returns_none_without_dovi_md() -> None:
+    from app.review.context import extract_notion_api_spec_link
+
+    assert extract_notion_api_spec_link([ContextFile(path="README.md", content="x")]) is None
+
+
+def test_extract_notion_api_spec_link_returns_none_without_link_line() -> None:
+    from app.review.context import extract_notion_api_spec_link
+
+    dovi = ContextFile(path="DOVI.md", content="## API Specification\n(아직 없음)\n")
+    assert extract_notion_api_spec_link([dovi]) is None

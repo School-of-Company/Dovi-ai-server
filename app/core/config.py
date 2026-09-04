@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-ai/CodeRankEmbed"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    # 기본 False: Notion 연동 설정이 없는 레포/환경에서도 앱이 정상 기동해야 한다.
+    # DOVI.md에 Notion API 명세 DB 링크가 등록된 뒤 .env에서 명시적으로 켠다.
+    notion_sync_enabled: bool = False
+    notion_api_token: str = ""
+    api_spec_collection_name: str = "dovi_api_spec_chunks"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

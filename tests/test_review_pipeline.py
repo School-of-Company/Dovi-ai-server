@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
+from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.pipeline import ReviewPipeline, _truncate_diff_blocks
 from app.review.schema import (
@@ -124,6 +125,30 @@ class FakeRetriever:
         exclude_file_path: str | None = None,
     ) -> list[ChunkSearchResult]:
         self.received_queries.append((query_text, repository_id, exclude_file_path))
+        return self.results
+
+
+class FakeNotionLinkStore:
+    def __init__(self) -> None:
+        self.saved: list[tuple[int, str]] = []
+
+    async def save(self, *, repository_id: int, notion_database_url: str) -> None:
+        self.saved.append((repository_id, notion_database_url))
+
+    async def get(self, *, repository_id: int) -> str | None:
+        return None
+
+    async def list_all(self) -> list[tuple[int, str]]:
+        return []
+
+
+class FakeApiSpecRetriever:
+    def __init__(self, results: list[ApiSpecSearchResult]) -> None:
+        self.results = results
+        self.received: tuple[str, int] | None = None
+
+    def retrieve(self, query_text: str, repository_id: int) -> list[ApiSpecSearchResult]:
+        self.received = (query_text, repository_id)
         return self.results
 
 
@@ -518,6 +543,134 @@ async def test_run_returns_failed_on_server_error() -> None:
     assert isinstance(result, ReviewFailedEvent)
     assert result.reason == "server_error"
     assert fake.call_count == 2  # 1회 재시도 후 실패
+
+
+async def test_run_saves_notion_link_when_no_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    link_store = FakeNotionLinkStore()
+    event = _event()
+    event.context_files = [
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        )
+    ]
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", notion_link_store=link_store
+    )
+
+    await pipeline.run(event)
+
+    assert link_store.saved == [(42, "https://notion.so/abc")]
+
+
+async def test_run_survives_notion_link_store_save_failure() -> None:
+    class BoomNotionLinkStore:
+        async def save(self, *, repository_id: int, notion_database_url: str) -> None:
+            raise RuntimeError("redis unreachable")
+
+        async def get(self, *, repository_id: int) -> str | None:
+            return None
+
+        async def list_all(self) -> list[tuple[int, str]]:
+            return []
+
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    event = _event()
+    event.context_files = [
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        )
+    ]
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        notion_link_store=BoomNotionLinkStore(),
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary == "ok"
+
+
+async def test_run_does_not_save_notion_link_when_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    link_store = FakeNotionLinkStore()
+    event = _event()
+    event.context_files = [
+        ContextFile(path="openapi.yaml", content="..."),
+        ContextFile(
+            path="DOVI.md",
+            content="## API Specification\n- Notion API Spec: https://notion.so/abc\n",
+        ),
+    ]
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", notion_link_store=link_store
+    )
+
+    await pipeline.run(event)
+
+    assert link_store.saved == []
+
+
+async def test_run_includes_api_spec_when_no_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    api_spec_retriever = FakeApiSpecRetriever(
+        [
+            ApiSpecSearchResult(
+                method="GET",
+                path="/api/x",
+                summary="s",
+                request_schema="",
+                response_schema="",
+                auth="",
+                score=0.9,
+            )
+        ]
+    )
+    event = _event()  # context_files에 openapi/swagger 없음
+
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", api_spec_retriever=api_spec_retriever
+    )
+    await pipeline.run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 API 명세" in user_message
+    assert "GET /api/x" in user_message
+
+
+async def test_run_skips_api_spec_when_swagger_present() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    api_spec_retriever = FakeApiSpecRetriever(
+        [
+            ApiSpecSearchResult(
+                method="GET",
+                path="/api/x",
+                summary="s",
+                request_schema="",
+                response_schema="",
+                auth="",
+                score=0.9,
+            )
+        ]
+    )
+    event = _event()
+    event.context_files = [ContextFile(path="openapi.yaml", content="...")]
+
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", api_spec_retriever=api_spec_retriever
+    )
+    await pipeline.run(event)
+
+    assert api_spec_retriever.received is None
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "관련 API 명세" not in user_message
 
 
 @pytest.mark.parametrize("reviews", [[], None])
