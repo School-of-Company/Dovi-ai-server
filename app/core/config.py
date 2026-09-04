@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-ai/CodeRankEmbed"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    # TODO(Task 8): notion_api_token 발급/주입 경로와 api_spec_collection_name
+    # 기본값을 최종 확정한다. 지금은 scripts/sync_api_spec.py의 mypy 통과를 위한
+    # 최소 placeholder다.
+    notion_api_token: str = ""
+    api_spec_collection_name: str = "dovi_api_spec"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
