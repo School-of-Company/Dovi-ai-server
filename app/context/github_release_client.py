@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -23,26 +24,24 @@ class ReleaseNotesResult:
     notes: str | None
 
 
+def _build_changelog_section_pattern(version: str) -> re.Pattern[str]:
+    escaped = re.escape(version)
+    # 헤딩 라인은 [^\n]*로 한 줄만 매칭한다 — re.DOTALL 하에서 `.*$\n`을 쓰면
+    # `.`이 개행까지 흡수해 greedy 백트래킹이 문서 끝에서부터 첫 `$\n` 경계를
+    # 찾아버려(즉 헤딩 바로 다음이 아니라 문서 맨 뒤 근처) 섹션 본문이 통째로
+    # 사라지는 문제가 있다.
+    return re.compile(
+        rf"^##\s+\[?{escaped}\]?[^\n]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL
+    )
+
+
 def _extract_changelog_section(text: str, version: str) -> str | None:
-    lines = text.split("\n")
-    section_lines = []
-    found_header = False
-
-    for line in lines:
-        if line.startswith("##") and version in line:
-            found_header = True
-            continue
-
-        if found_header:
-            if line.startswith("##"):
-                break
-            section_lines.append(line)
-
-    if section_lines:
-        section = "\n".join(section_lines).strip()
-        return section if section else None
-
-    return None
+    pattern = _build_changelog_section_pattern(version)
+    match = pattern.search(text)
+    if match is None:
+        return None
+    section = match.group(1).strip()
+    return section if section else None
 
 
 class GithubReleaseClient:

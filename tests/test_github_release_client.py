@@ -112,3 +112,56 @@ async def test_returns_not_ok_on_network_error() -> None:
     result = await client.find_release_notes("axios/axios", "axios", "1.20.0")
     assert result.ok is False
     assert result.notes is None
+
+
+async def test_changelog_section_preserves_h3_subheadings() -> None:
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    def raw_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                "# Changelog\n\n"
+                "## 1.20.0\n\n"
+                "### Features\n\n"
+                "- Added new option\n\n"
+                "### Bug Fixes\n\n"
+                "- Fixed a bug\n\n"
+                "## 1.19.0\n\n"
+                "- Old release\n"
+            ),
+        )
+
+    client = _client(api_handler, raw_handler)
+    result = await client.find_release_notes("axios/axios", "axios", "1.20.0")
+    assert result == ReleaseNotesResult(
+        ok=True,
+        notes=(
+            "### Features\n\n"
+            "- Added new option\n\n"
+            "### Bug Fixes\n\n"
+            "- Fixed a bug"
+        ),
+    )
+
+
+async def test_changelog_section_uses_exact_version_not_substring() -> None:
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    def raw_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                "# Changelog\n\n"
+                "## 12.0.0\n\n"
+                "- Should not match when searching for 2.0.0\n\n"
+                "## 2.0.0\n\n"
+                "- Correct release notes\n"
+            ),
+        )
+
+    client = _client(api_handler, raw_handler)
+    result = await client.find_release_notes("axios/axios", "axios", "2.0.0")
+    assert result == ReleaseNotesResult(ok=True, notes="- Correct release notes")
