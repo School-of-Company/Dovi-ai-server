@@ -625,12 +625,27 @@ async def test_upsert_feedback_creates_then_updates(repo_and_sessions) -> None:
 
 
 async def test_upsert_feedback_unknown_review_job_id_does_not_raise(repo_and_sessions) -> None:
-    repo, _ = repo_and_sessions
+    repo, session_factory = repo_and_sessions
 
     await repo.upsert_feedback(
         ReviewFeedbackEvent(review_job_id="does-not-exist", finding_index=0, reflected=True, reason=None)
     )
-    # 예외 없이 조용히 로깅만 하면 성공 (assert 없음 — 예외가 안 나는 것 자체가 검증)
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ReviewFeedbackRow).where(
+                        ReviewFeedbackRow.review_job_id == "does-not-exist"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # 예외를 던지지 않을 뿐 아니라, FK 위반으로 실제로 아무 행도 남지 않아야 한다
+    # (트랜잭션이 롤백됐는지 확인 — 예외 미발생만으로는 부분 커밋 여부를 못 잡는다)
+    assert rows == []
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
