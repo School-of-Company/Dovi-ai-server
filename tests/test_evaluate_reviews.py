@@ -27,6 +27,7 @@ async def _seed(
     reflected: bool,
     model_version: str = "m1",
     prompt_version: str = "p1",
+    finding_index: int = 0,
 ) -> None:
     now = datetime.now(UTC)
     session.add(
@@ -52,7 +53,7 @@ async def _seed(
     session.add(
         ReviewFeedbackRow(
             review_job_id=job_id,
-            finding_index=0,
+            finding_index=finding_index,
             reflected=reflected,
             reason=None,
             updated_at=now,
@@ -80,6 +81,17 @@ async def test_build_report_computes_acceptance_rates(session: AsyncSession) -> 
 
 
 async def test_build_report_empty_db_returns_none_rate(session: AsyncSession) -> None:
+    report = await build_report(session)
+
+    assert report["total_feedback_count"] == 0
+    assert report["overall_acceptance_rate"] is None
+    assert report["by_severity"] == {}
+    assert report["by_model_prompt_version"] == {}
+
+
+async def test_build_report_skips_out_of_range_finding_index(session: AsyncSession) -> None:
+    await _seed(session, job_id="1", severity="critical", reflected=True, finding_index=1)
+
     report = await build_report(session)
 
     assert report["total_feedback_count"] == 0
