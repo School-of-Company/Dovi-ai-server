@@ -243,3 +243,66 @@ async def test_run_processes_all_messages_and_commits_each() -> None:
 
     assert len(producer.completed) == 2
     assert source.commit_count == 2
+
+
+class FakeEvaluationRepository:
+    def __init__(self, *, raise_on_completed: bool = False) -> None:
+        self.completed: list[ReviewCompletedEvent] = []
+        self.failed: list[ReviewFailedEvent] = []
+        self._raise_on_completed = raise_on_completed
+
+    async def save_completed(self, event: ReviewCompletedEvent) -> None:
+        if self._raise_on_completed:
+            raise RuntimeError("db down")
+        self.completed.append(event)
+
+    async def save_failed(self, event: ReviewFailedEvent) -> None:
+        self.failed.append(event)
+
+    async def upsert_feedback(self, feedback: object) -> None:
+        raise AssertionError("not used by ReviewRequestConsumer")
+
+
+async def test_handle_saves_completed_event_to_evaluation_repository() -> None:
+    evaluation_repository = FakeEvaluationRepository()
+    consumer = ReviewRequestConsumer(
+        FakeSource([]),
+        _pipeline(ReviewModelOutput(summary="ok", reviews=[])),
+        FakeProducer(),
+        FakeDedupStore(),
+        evaluation_repository=evaluation_repository,
+    )
+
+    await consumer.handle(_event_bytes())
+
+    assert len(evaluation_repository.completed) == 1
+
+
+async def test_handle_evaluation_repository_failure_does_not_break_pipeline_flow() -> None:
+    producer = FakeProducer()
+    dedup = FakeDedupStore()
+    evaluation_repository = FakeEvaluationRepository(raise_on_completed=True)
+    consumer = ReviewRequestConsumer(
+        FakeSource([]),
+        _pipeline(ReviewModelOutput(summary="ok", reviews=[])),
+        producer,
+        dedup,
+        evaluation_repository=evaluation_repository,
+    )
+
+    await consumer.handle(_event_bytes())
+
+    assert len(producer.completed) == 1
+    assert dedup.completed == ["42:7:sha"]
+
+
+async def test_handle_without_evaluation_repository_still_works() -> None:
+    consumer = ReviewRequestConsumer(
+        FakeSource([]),
+        _pipeline(ReviewModelOutput(summary="ok", reviews=[])),
+        FakeProducer(),
+        FakeDedupStore(),
+    )
+
+    await consumer.handle(_event_bytes())
+    # evaluation_repository=None이어도 예외 없이 끝나면 성공

@@ -5,10 +5,11 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from app.evaluation.repository import EvaluationRepository
 from app.kafka.producer import EventPublisher
 from app.review.dedup import DedupStore
 from app.review.pipeline import ReviewPipeline
-from app.review.schema import ReviewCompletedEvent, ReviewRequestedEvent
+from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent, ReviewRequestedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,13 @@ class ReviewRequestConsumer:
         pipeline: ReviewPipeline,
         producer: EventPublisher,
         dedup: DedupStore,
+        evaluation_repository: EvaluationRepository | None = None,
     ) -> None:
         self._source = source
         self._pipeline = pipeline
         self._producer = producer
         self._dedup = dedup
+        self._evaluation_repository = evaluation_repository
 
     async def run(self, shutdown: asyncio.Event | None = None) -> None:
         """shutdown이 주어지면, 처리 중이던 메시지를 커밋까지 마친 뒤 다음 메시지를
@@ -72,8 +75,25 @@ class ReviewRequestConsumer:
             else:
                 await self._producer.publish_failed(result)
                 await self._dedup.mark_failed(event.review_job_id)
+            await self._save_evaluation_record(result)
         except asyncio.CancelledError:
             # graceful shutdown 유예시간을 넘겨 강제 취소된 경우 — 락을 풀어
             # 재전달된 메시지를 새 인스턴스가 TTL을 기다리지 않고 재처리하게 한다.
             await self._dedup.mark_failed(event.review_job_id)
             raise
+
+    async def _save_evaluation_record(
+        self, result: ReviewCompletedEvent | ReviewFailedEvent
+    ) -> None:
+        if self._evaluation_repository is None:
+            return
+        try:
+            if isinstance(result, ReviewCompletedEvent):
+                await self._evaluation_repository.save_completed(result)
+            else:
+                await self._evaluation_repository.save_failed(result)
+        except Exception:
+            logger.exception(
+                "failed to persist evaluation record reviewJobId=%s",
+                result.review_job_id,
+            )
