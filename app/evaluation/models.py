@@ -39,7 +39,7 @@ class ReviewRecordRow(Base):
     review_job_id: Mapped[str] = mapped_column(
         String, ForeignKey("review_jobs.review_job_id"), primary_key=True
     )
-    reviews: Mapped[list[dict]] = mapped_column(_ReviewsJson, nullable=False)
+    reviews: Mapped[list[dict[str, object]]] = mapped_column(_ReviewsJson, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     model_version: Mapped[str] = mapped_column(String, nullable=False)
     prompt_version: Mapped[str] = mapped_column(String, nullable=False)
