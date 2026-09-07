@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     notion_api_token: str = ""
     api_spec_collection_name: str = "dovi_api_spec_chunks"
 
+    # 기본 False: registry 조회가 필요 없는 레포/환경에서도 앱이 정상 기동해야 한다.
+    dependency_check_enabled: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

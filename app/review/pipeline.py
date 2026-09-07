@@ -13,6 +13,7 @@ from app.review.context import build_context, extract_notion_api_spec_link, has_
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
+    ChangedFile,
     FailureReason,
     ReviewComment,
     ReviewCompletedEvent,
@@ -221,6 +222,22 @@ class ApiSpecContextRetriever(Protocol):
         ...
 
 
+class DependencyContextResolver(Protocol):
+    async def find_deprecated_dependencies(
+        self, changed_files: list[ChangedFile]
+    ) -> list[ReviewComment]:
+        """changed_files 중 lockfile 변경분에서 deprecated 의존성을 찾는다.
+
+        실패 시 빈 리스트를 반환한다(리뷰 자체를 막지 않는다). 반환하는
+        `ReviewComment`는 항상 `severity="minor"`여야 한다 — 파이프라인이 이
+        계약에 의존해 이 finding들을 summary-only 경로로 라우팅하고
+        critical/major에만 적용되는 2차 검증(`_verify()`)을 건너뛴다. 다른
+        severity를 반환하면 검증되지 않은 finding이 인라인 코멘트로 노출될 수
+        있다.
+        """
+        ...
+
+
 class ReviewPipeline:
     def __init__(
         self,
@@ -233,6 +250,7 @@ class ReviewPipeline:
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
+        dependency_resolver: DependencyContextResolver | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
@@ -242,14 +260,28 @@ class ReviewPipeline:
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
+        self._dependency_resolver = dependency_resolver
 
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
         targets = analyze(event)
         await self._maybe_save_notion_link(event)
+
+        # analyze()는 package-lock.json 등 lockfile을 targets에서 항상 제외하므로,
+        # lockfile만 바뀐 PR(예: npm audit fix, renovate/dependabot lockfile
+        # maintenance)은 resolver를 여기서 먼저 돌리지 않으면 이 기능의 핵심
+        # 대상 시나리오에서 절대 실행되지 않는다. targets 유무와 무관하게 항상
+        # 한 번만 계산해서, 아래 LLM 성공 분기에서도 재사용한다(중복 조회 방지).
+        dependency_findings = await self._find_dependency_findings(event)
+
         if not targets:
-            return self._completed(event, "No reviewable changes found.", [])
+            if not dependency_findings:
+                return self._completed(event, "No reviewable changes found.", [])
+            summary = self._build_summary(
+                "리뷰 대상 코드 변경은 없습니다.", dependency_findings, []
+            )
+            return self._completed(event, summary, [])
 
         related_context = await self._retrieve_related_context(event.repository_id, targets)
         api_spec_context = await self._retrieve_api_spec_context(event, targets)
@@ -280,10 +312,13 @@ class ReviewPipeline:
                 last_reason = "server_error"
                 continue
 
+            llm_reviews = list(output.reviews)
+            output.reviews.extend(dependency_findings)
+
             reviews = filter_reviews(output.reviews)
             if reviews:
                 reviews = await self._verify(event, messages, reviews)
-            summary = self._build_summary(output.summary, output.reviews)
+            summary = self._build_summary(output.summary, output.reviews, llm_reviews)
             logger.info(
                 "review completed reviewJobId=%s reviewCount=%d",
                 event.review_job_id,
@@ -313,7 +348,12 @@ class ReviewPipeline:
             prompt_version=self._prompt_version,
         )
 
-    def _build_summary(self, summary: str, reviews: list[ReviewComment]) -> str:
+    def _build_summary(
+        self,
+        summary: str,
+        all_reviews: list[ReviewComment],
+        llm_reviews: list[ReviewComment],
+    ) -> str:
         # 프롬프트에 summary 작성 지침을 넣어도 모델이 빈 문자열이나 공백만
         # 반환하는 경우가 있다 — PR의 메인 코멘트가 사실상 텅 비어 보이는
         # 상황을 막기 위해 코드 레벨로도 한 번 더 방어한다.
@@ -324,7 +364,10 @@ class ReviewPipeline:
         # 프로즈로 풀어쓰는 회귀(reviews[]는 비어있는데 summary만 장문인 경우)를
         # 코드로 강제하긴 어렵지만, 프로덕션에서 재발했는지는 로그로라도 알 수
         # 있어야 한다. summary가 비정상적으로 긴데 reviews가 비어있으면 의심 신호다.
-        if len(summary) > _SUSPICIOUS_SUMMARY_LENGTH and not reviews:
+        # 이건 LLM 자체의 출력만 보고 판단해야 한다 — dependency resolver가 만든
+        # finding까지 섞어서 보면(all_reviews), resolver가 finding 하나만 반환해도
+        # "reviews가 비지 않았다"고 오판해 이 경고가 영구히 안 뜨게 된다.
+        if len(summary) > _SUSPICIOUS_SUMMARY_LENGTH and not llm_reviews:
             logger.warning(
                 "summary unusually long (%d chars) with no reviews[] entries — "
                 "possible finding leaked into summary prose instead of reviews[]",
@@ -332,8 +375,9 @@ class ReviewPipeline:
             )
 
         # minor/suggestion은 inline comment로 달지 않는 대신, 요약에 한 줄씩 남긴다
-        # (노션 20절 "Minor/Suggestion은 summary로만 제공").
-        notes = summarize_minor(reviews)
+        # (노션 20절 "Minor/Suggestion은 summary로만 제공"). 여기는 dependency
+        # finding을 포함한 전체 목록(all_reviews)을 써야 summary bullet에 나타난다.
+        notes = summarize_minor(all_reviews)
         if not notes:
             return summary
         bullet_list = "\n".join(f"- {title}" for title in notes)
@@ -441,6 +485,21 @@ class ReviewPipeline:
             )
         except Exception:
             logger.warning("failed to save notion api spec link", exc_info=True)
+
+    async def _find_dependency_findings(
+        self, event: ReviewRequestedEvent
+    ) -> list[ReviewComment]:
+        if self._dependency_resolver is None:
+            return []
+        try:
+            return await self._dependency_resolver.find_deprecated_dependencies(
+                event.changed_files
+            )
+        except Exception:
+            logger.warning(
+                "dependency resolver failed reviewJobId=%s", event.review_job_id, exc_info=True
+            )
+            return []
 
     async def _retrieve_related_context(
         self, repository_id: int, targets: list[ReviewTarget]

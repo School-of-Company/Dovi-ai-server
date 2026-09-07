@@ -143,3 +143,92 @@ async def test_lifespan_wires_rag_retriever_when_enabled(
         assert fake_qdrant_client.closed
     finally:
         get_settings.cache_clear()
+
+
+class FakeNpmRegistryClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.closed = False
+
+    async def check_deprecation(self, name: str, version: str) -> object:
+        raise AssertionError("should not be called in this test")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_lifespan_wires_dependency_resolver_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("DEPENDENCY_CHECK_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    fake_npm_registry_client = FakeNpmRegistryClient()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.context.npm_registry_client.NpmRegistryClient",
+        lambda *args, **kwargs: fake_npm_registry_client,
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("dependency_resolver") is not None
+        assert fake_npm_registry_client.closed
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_leaves_dependency_resolver_none_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    # DEPENDENCY_CHECK_ENABLED를 아예 설정하지 않는다 (기본 False 확인)
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("dependency_resolver") is None
+    finally:
+        get_settings.cache_clear()
