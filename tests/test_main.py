@@ -232,3 +232,99 @@ async def test_lifespan_leaves_dependency_resolver_none_when_disabled(
         assert captured_kwargs.get("dependency_resolver") is None
     finally:
         get_settings.cache_clear()
+
+
+class FakeEvaluationRepository:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def save_completed(self, event: object) -> None:
+        pass
+
+    async def save_failed(self, event: object) -> None:
+        pass
+
+    async def upsert_feedback(self, feedback: object) -> None:
+        pass
+
+
+class FakeEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+async def test_lifespan_wires_evaluation_repository_and_feedback_consumer_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("EVALUATION_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    fake_feedback_consumer = FakeConsumerSource()
+    fake_engine = FakeEngine()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.main.create_review_feedback_consumer",
+        lambda settings: fake_feedback_consumer,
+    )
+    monkeypatch.setattr("app.evaluation.db.create_engine", lambda settings: fake_engine)
+    monkeypatch.setattr(
+        "app.evaluation.repository.SqlAlchemyEvaluationRepository",
+        lambda session_factory: FakeEvaluationRepository(),
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+            assert fake_feedback_consumer.started
+
+        assert fake_feedback_consumer.stopped
+        assert fake_engine.disposed
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_leaves_evaluation_repository_none_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    # EVALUATION_ENABLED를 아예 설정하지 않는다 (기본 False 확인)
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+    finally:
+        get_settings.cache_clear()
