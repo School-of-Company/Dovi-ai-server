@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import ValidationError
 
-from app.evaluation.repository import EvaluationRepository
 from app.kafka.producer import EventPublisher
 from app.review.dedup import DedupStore
 from app.review.pipeline import ReviewPipeline
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent, ReviewRequestedEvent
+
+if TYPE_CHECKING:
+    from app.evaluation.repository import EvaluationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +76,14 @@ class ReviewRequestConsumer:
             if isinstance(result, ReviewCompletedEvent):
                 await self._producer.publish_completed(result)
                 await self._dedup.mark_completed(event.review_job_id)
+                await self._save_evaluation_record(result)
             else:
                 await self._producer.publish_failed(result)
+                # mark_failed()는 dedup 키를 삭제해 같은 reviewJobId의 재전달 락을
+                # 풀어버린다 — 락을 놓기 전에 저장을 끝내야, 재전달된 메시지가 같은
+                # job의 save_failed와 동시에 경쟁하는 좁은 창을 닫을 수 있다.
+                await self._save_evaluation_record(result)
                 await self._dedup.mark_failed(event.review_job_id)
-            await self._save_evaluation_record(result)
         except asyncio.CancelledError:
             # graceful shutdown 유예시간을 넘겨 강제 취소된 경우 — 락을 풀어
             # 재전달된 메시지를 새 인스턴스가 TTL을 기다리지 않고 재처리하게 한다.

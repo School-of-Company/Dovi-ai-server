@@ -30,6 +30,11 @@ Redis에 JSON으로 넣으면 매번 전체 키를 스캔해야 하고, 영구 �
 
 ```
 Topic: pr.comment.reflected
+Kafka message key: reviewJobId (필수) — 같은 reviewJobId의 여러 findingIndex 피드백이
+같은 파티션으로 가야, 단일 인스턴스가 순차 처리한다는 가정(review_feedback의
+upsert가 dedup 없는 get-then-write인 이유)이 실제로 성립한다. key 없이 발행하면
+파티션이 여러 개이거나 인스턴스가 2대 이상일 때 같은 (reviewJobId, findingIndex)의
+동시 upsert가 유니크 제약 위반으로 조용히 유실될 수 있다.
 
 ReviewFeedbackEvent:
   reviewJobId    # repositoryId:prNumber:headSha, 원본 리뷰와 매칭

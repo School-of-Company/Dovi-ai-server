@@ -296,6 +296,57 @@ async def test_handle_evaluation_repository_failure_does_not_break_pipeline_flow
     assert dedup.completed == ["42:7:sha"]
 
 
+async def test_handle_saves_failed_event_to_evaluation_repository() -> None:
+    producer = FakeProducer()
+    dedup = FakeDedupStore()
+    evaluation_repository = FakeEvaluationRepository()
+    pipeline = ReviewPipeline(FailingLLM(), model_version="v", prompt_version="v1")
+    consumer = ReviewRequestConsumer(
+        FakeSource([]),
+        pipeline,
+        producer,
+        dedup,
+        evaluation_repository=evaluation_repository,
+    )
+
+    await consumer.handle(_event_bytes())
+
+    assert len(evaluation_repository.failed) == 1
+    assert evaluation_repository.failed[0].review_job_id == "42:7:sha"
+    assert evaluation_repository.failed[0].reason == "server_error"
+    assert evaluation_repository.completed == []
+    # 저장은 dedup 락 해제(mark_failed)보다 먼저 끝나야 한다.
+    assert dedup.failed == ["42:7:sha"]
+    assert len(producer.failed) == 1
+
+
+async def test_handle_saves_failed_event_before_releasing_dedup_lock() -> None:
+    call_order: list[str] = []
+
+    class OrderTrackingDedupStore(FakeDedupStore):
+        async def mark_failed(self, review_job_id: str) -> None:
+            call_order.append("mark_failed")
+            await super().mark_failed(review_job_id)
+
+    class OrderTrackingRepository(FakeEvaluationRepository):
+        async def save_failed(self, event: ReviewFailedEvent) -> None:
+            call_order.append("save_failed")
+            await super().save_failed(event)
+
+    pipeline = ReviewPipeline(FailingLLM(), model_version="v", prompt_version="v1")
+    consumer = ReviewRequestConsumer(
+        FakeSource([]),
+        pipeline,
+        FakeProducer(),
+        OrderTrackingDedupStore(),
+        evaluation_repository=OrderTrackingRepository(),
+    )
+
+    await consumer.handle(_event_bytes())
+
+    assert call_order == ["save_failed", "mark_failed"]
+
+
 async def test_handle_without_evaluation_repository_still_works() -> None:
     consumer = ReviewRequestConsumer(
         FakeSource([]),

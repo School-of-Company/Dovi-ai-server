@@ -127,6 +127,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory = create_session_factory(evaluation_engine)
         evaluation_repository = SqlAlchemyEvaluationRepository(session_factory)
 
+        # 스펙 판정: evaluation_enabled=true인데 DB/스키마가 없으면 다른 필수
+        # 인프라와 동급으로 기동 실패시킨다(조용한 무동작 대신) — create_async_engine()은
+        # lazy connect라 여기서 명시적으로 확인해야 한다. review_jobs를 직접
+        # 건드리는 쿼리라 "연결은 되지만 마이그레이션 미적용" 케이스도 같이 잡는다.
+        from sqlalchemy import select
+
+        from app.evaluation.models import ReviewJobRow
+
+        async with evaluation_engine.connect() as conn:
+            await conn.execute(select(ReviewJobRow.review_job_id).limit(1))
+
     pipeline = ReviewPipeline(
         llm_client,
         model_version=settings.llm_model,

@@ -70,6 +70,10 @@ async def test_save_completed_persists_job_and_record(
     assert record.model_version == "qwen2.5-coder-32b"
     assert len(record.reviews) == 1
     assert record.reviews[0]["severity"] == "minor"
+    # by_alias=True로 직렬화됐는지 — severity만 보면 snake_case/camelCase가
+    # 구분되지 않아, 밑줄이 있는 필드로 확인해야 실제로 계약을 검증한다.
+    assert "filePath" in record.reviews[0]
+    assert "file_path" not in record.reviews[0]
 
 
 async def test_save_completed_is_idempotent(
@@ -93,7 +97,19 @@ async def test_save_completed_is_idempotent(
             .scalars()
             .all()
         )
+        record_rows = (
+            (
+                await session.execute(
+                    select(ReviewRecordRow).where(
+                        ReviewRecordRow.review_job_id == "123:45:abcabc"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
+    assert len(record_rows) == 1
 
 
 async def test_save_failed_parses_review_job_id(
