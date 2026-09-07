@@ -15,6 +15,7 @@ from app.kafka.client import (
     create_comment_answer_consumer,
     create_consumer,
     create_producer,
+    create_review_feedback_consumer,
 )
 from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import CommentAnswerEventProducer, ReviewEventProducer
@@ -116,6 +117,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         npm_deprecation_cache = RedisNpmDeprecationCache(redis_client)  # type: ignore[arg-type]
         dependency_resolver = DependencyResolver(npm_registry_client, npm_deprecation_cache)
 
+    evaluation_repository = None
+    evaluation_engine = None
+    if settings.evaluation_enabled:
+        from app.evaluation.db import create_engine, create_session_factory
+        from app.evaluation.repository import SqlAlchemyEvaluationRepository
+
+        evaluation_engine = create_engine(settings)
+        session_factory = create_session_factory(evaluation_engine)
+        evaluation_repository = SqlAlchemyEvaluationRepository(session_factory)
+
+        # 스펙 판정: evaluation_enabled=true인데 DB/스키마가 없으면 다른 필수
+        # 인프라와 동급으로 기동 실패시킨다(조용한 무동작 대신) — create_async_engine()은
+        # lazy connect라 여기서 명시적으로 확인해야 한다. review_jobs를 직접
+        # 건드리는 쿼리라 "연결은 되지만 마이그레이션 미적용" 케이스도 같이 잡는다.
+        from sqlalchemy import select
+
+        from app.evaluation.models import ReviewJobRow
+
+        async with evaluation_engine.connect() as conn:
+            await conn.execute(select(ReviewJobRow.review_job_id).limit(1))
+
     pipeline = ReviewPipeline(
         llm_client,
         model_version=settings.llm_model,
@@ -135,6 +157,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await kafka_consumer.start()
     await comment_answer_kafka_consumer.start()
 
+    review_feedback_kafka_consumer = None
+    if settings.evaluation_enabled:
+        review_feedback_kafka_consumer = create_review_feedback_consumer(settings)
+        await review_feedback_kafka_consumer.start()
+
     # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
     # 완전히 일치하지 않지만, set/get/delete를 문자열 인자로만 호출하므로 런타임에는 호환된다.
     dedup_store = create_dedup_store(settings, redis_client)  # type: ignore[arg-type]
@@ -153,7 +180,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         failed_topic=settings.kafka_comment_answer_failed_topic,
     )
     review_consumer = ReviewRequestConsumer(
-        kafka_consumer, pipeline, event_producer, dedup_store
+        kafka_consumer,
+        pipeline,
+        event_producer,
+        dedup_store,
+        evaluation_repository=evaluation_repository,
     )
     comment_answer_consumer = CommentAnswerConsumer(
         comment_answer_kafka_consumer,
@@ -170,7 +201,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             comment_answer_consumer, shutdown_event, name="comment-answer"
         )
     )
-    tasks = (consumer_task, comment_answer_task)
+    tasks: list[asyncio.Task[None]] = [consumer_task, comment_answer_task]
+    if review_feedback_kafka_consumer is not None:
+        from app.evaluation.feedback_consumer import ReviewFeedbackConsumer
+
+        assert evaluation_repository is not None
+        review_feedback_consumer = ReviewFeedbackConsumer(
+            review_feedback_kafka_consumer, evaluation_repository
+        )
+        review_feedback_task = asyncio.create_task(
+            _run_consumer_forever(
+                review_feedback_consumer, shutdown_event, name="review-feedback"
+            )
+        )
+        tasks.append(review_feedback_task)
 
     try:
         yield
@@ -193,6 +237,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pass
         await kafka_consumer.stop()
         await comment_answer_kafka_consumer.stop()
+        if review_feedback_kafka_consumer is not None:
+            await review_feedback_kafka_consumer.stop()
         await kafka_producer.stop()
         await redis_client.aclose()
         await llm_client.aclose()
@@ -200,6 +246,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             qdrant_client.close()
         if npm_registry_client is not None:
             await npm_registry_client.aclose()
+        if evaluation_engine is not None:
+            await evaluation_engine.dispose()
 
 
 settings = get_settings()

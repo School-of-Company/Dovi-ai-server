@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import ValidationError
 
 from app.kafka.producer import EventPublisher
 from app.review.dedup import DedupStore
 from app.review.pipeline import ReviewPipeline
-from app.review.schema import ReviewCompletedEvent, ReviewRequestedEvent
+from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent, ReviewRequestedEvent
+
+if TYPE_CHECKING:
+    from app.evaluation.repository import EvaluationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +41,13 @@ class ReviewRequestConsumer:
         pipeline: ReviewPipeline,
         producer: EventPublisher,
         dedup: DedupStore,
+        evaluation_repository: EvaluationRepository | None = None,
     ) -> None:
         self._source = source
         self._pipeline = pipeline
         self._producer = producer
         self._dedup = dedup
+        self._evaluation_repository = evaluation_repository
 
     async def run(self, shutdown: asyncio.Event | None = None) -> None:
         """shutdown이 주어지면, 처리 중이던 메시지를 커밋까지 마친 뒤 다음 메시지를
@@ -69,11 +76,32 @@ class ReviewRequestConsumer:
             if isinstance(result, ReviewCompletedEvent):
                 await self._producer.publish_completed(result)
                 await self._dedup.mark_completed(event.review_job_id)
+                await self._save_evaluation_record(result)
             else:
                 await self._producer.publish_failed(result)
+                # mark_failed()는 dedup 키를 삭제해 같은 reviewJobId의 재전달 락을
+                # 풀어버린다 — 락을 놓기 전에 저장을 끝내야, 재전달된 메시지가 같은
+                # job의 save_failed와 동시에 경쟁하는 좁은 창을 닫을 수 있다.
+                await self._save_evaluation_record(result)
                 await self._dedup.mark_failed(event.review_job_id)
         except asyncio.CancelledError:
             # graceful shutdown 유예시간을 넘겨 강제 취소된 경우 — 락을 풀어
             # 재전달된 메시지를 새 인스턴스가 TTL을 기다리지 않고 재처리하게 한다.
             await self._dedup.mark_failed(event.review_job_id)
             raise
+
+    async def _save_evaluation_record(
+        self, result: ReviewCompletedEvent | ReviewFailedEvent
+    ) -> None:
+        if self._evaluation_repository is None:
+            return
+        try:
+            if isinstance(result, ReviewCompletedEvent):
+                await self._evaluation_repository.save_completed(result)
+            else:
+                await self._evaluation_repository.save_failed(result)
+        except Exception:
+            logger.exception(
+                "failed to persist evaluation record reviewJobId=%s",
+                result.review_job_id,
+            )
