@@ -37,6 +37,13 @@
   포함되어 있어 `analyze()`가 만드는 `targets`에는 절대 안 들어온다(일반
   코드 리뷰 대상에서 의도적으로 제외됨). 따라서 이 기능은 `targets`가 아니라
   `event.changed_files` 원본 리스트를 별도로 훑어야 한다.
+  > **최종 리뷰에서 발견된 실수 (사후 기록)**: 원래 계획/이번 스펙은 여기까지만
+  > 확인하고, `ReviewPipeline.run()`이 `if not targets: return ...`로 조기
+  > 반환한다는 사실을 놓쳤다. `package-lock.json`만 바뀐 PR(이 기능의 핵심
+  > 대상 시나리오인 `npm audit fix`/renovate/dependabot lockfile-maintenance
+  > PR)은 `targets == []`가 되어 resolver가 호출되기 전에 파이프라인이 이미
+  > 반환해버려, 기능이 있으나 마나였다. 전체 브랜치 최종 리뷰에서만 발견되어
+  > `run()`이 `if not targets` 체크보다 먼저 resolver를 호출하도록 수정했다.
 - 프로덕션 AI 서버 컨테이너에서 `registry.npmjs.org`로 아웃바운드 HTTPS
   접속 가능함을 직접 확인함(200 응답).
 - `ReviewComment.line`은 필수(`Field(gt=0)`) — 기존 코드엔 unified diff
@@ -117,6 +124,18 @@ class NpmRegistryClient:
         실패가 캐시 오염이나 전체 리뷰 실패로 번지지 않게 이 계층에서 끊는다).
         """
 ```
+
+> **최종 리뷰에서 발견된 실수 (사후 기록)**: 위 설계와 실제 초기 구현
+> (`get_deprecation_message`)은 "실패"와 "조회 성공했지만 deprecated 아님"을
+> 둘 다 `None`으로 뭉뚱그렸다. 그 결과 `DependencyResolver`는 registry가
+> 일시적으로 타임아웃/네트워크 실패해도 이를 `CachedResult(deprecated=False,
+> message=None)`으로 캐시에 30일간 저장해버려, "실패가 캐시 오염으로 번지지
+> 않는다"는 위 문장과 반대로 실제로는 번졌다. 최종 리뷰에서 발견되어
+> `NpmRegistryClient.check_deprecation()`이 `DeprecationLookupResult(ok: bool,
+> message: str | None)`을 반환하도록 바꿨다 — `ok=False`(네트워크 실패, 타임아웃,
+> 404, malformed JSON 등)는 캐시에 전혀 쓰지 않고 다음 PR에서 다시 조회하며,
+> `ok=True`(조회 자체는 성공, `message`가 `None`이면 단지 deprecated가 아니라는
+> 뜻)일 때만 `DependencyResolver`가 캐시에 기록한다.
 
 `httpx.AsyncClient` 사용(architecture.md의 async I/O 원칙). 패키지명에
 `/`가 포함되는 scoped package(`@tanstack/query-core`)는 npm registry

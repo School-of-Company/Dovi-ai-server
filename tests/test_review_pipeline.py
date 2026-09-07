@@ -721,6 +721,37 @@ async def test_run_includes_dependency_resolver_findings_in_summary() -> None:
     assert fake_resolver.received_changed_files == event.changed_files
 
 
+async def test_run_finds_dependency_findings_for_lockfile_only_pr_without_llm_call() -> None:
+    # analyze()는 package-lock.json을 targets에서 항상 제외하므로, lockfile만
+    # 바뀐 PR은 targets == [] 다 — resolver를 targets 체크보다 먼저 돌리지 않으면
+    # 이 기능의 핵심 시나리오(npm audit fix/renovate lockfile PR)에서 절대
+    # 실행되지 않는다(회귀 방지).
+    dependency_finding = ReviewComment(
+        severity="minor",
+        confidence=1.0,
+        file_path="package-lock.json",
+        line=42,
+        title="deprecated 패키지 추가/변경됨: axios@1.20.0",
+        message="npm registry: 'deprecated'",
+        evidence=['+      "version": "1.20.0",'],
+    )
+    fake_resolver = FakeDependencyResolver([dependency_finding])
+    fake_llm = FakeLLM(ReviewModelOutput(summary="unused", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v1", prompt_version="v1", dependency_resolver=fake_resolver
+    )
+    event = _event()
+    event.changed_files = [
+        ChangedFile(file_path="package-lock.json", status="modified", patch="@@ -1 +1 @@")
+    ]
+
+    result = await pipeline.run(event)
+
+    assert fake_llm.call_count == 0
+    assert isinstance(result, ReviewCompletedEvent)
+    assert "deprecated 패키지 추가/변경됨: axios@1.20.0" in result.summary
+
+
 async def test_run_works_without_dependency_resolver() -> None:
     # dependency_resolver=None(기본값)이면 기존 동작 그대로 — 회귀 방지.
     llm = FakeLLM(ReviewModelOutput(summary="정상 diff입니다.", reviews=[]))

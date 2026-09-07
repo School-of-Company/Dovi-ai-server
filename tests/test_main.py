@@ -145,6 +145,17 @@ async def test_lifespan_wires_rag_retriever_when_enabled(
         get_settings.cache_clear()
 
 
+class FakeNpmRegistryClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.closed = False
+
+    async def check_deprecation(self, name: str, version: str) -> object:
+        raise AssertionError("should not be called in this test")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 async def test_lifespan_wires_dependency_resolver_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,11 +167,16 @@ async def test_lifespan_wires_dependency_resolver_when_enabled(
     fake_producer = FakeStartStop()
     fake_consumer = FakeConsumerSource()
     fake_comment_answer_consumer = FakeConsumerSource()
+    fake_npm_registry_client = FakeNpmRegistryClient()
     monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
     monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
     monkeypatch.setattr(
         "app.main.create_comment_answer_consumer",
         lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.context.npm_registry_client.NpmRegistryClient",
+        lambda *args, **kwargs: fake_npm_registry_client,
     )
 
     captured_kwargs: dict[str, object] = {}
@@ -177,6 +193,7 @@ async def test_lifespan_wires_dependency_resolver_when_enabled(
             await asyncio.sleep(0.05)
 
         assert captured_kwargs.get("dependency_resolver") is not None
+        assert fake_npm_registry_client.closed
     finally:
         get_settings.cache_clear()
 

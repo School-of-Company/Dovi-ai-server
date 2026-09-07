@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     qdrant_client = None
+    npm_registry_client = None
     retriever = None
     api_spec_retriever = None
     if settings.rag_enabled:
@@ -110,6 +111,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.context.npm_registry_client import NpmRegistryClient
 
         npm_registry_client = NpmRegistryClient()
+        # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
+        # 완전히 일치하지 않지만, set/get을 문자열 인자로만 호출하므로 런타임에는 호환된다.
         npm_deprecation_cache = RedisNpmDeprecationCache(redis_client)  # type: ignore[arg-type]
         dependency_resolver = DependencyResolver(npm_registry_client, npm_deprecation_cache)
 
@@ -195,6 +198,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await llm_client.aclose()
         if qdrant_client is not None:
             qdrant_client.close()
+        if npm_registry_client is not None:
+            await npm_registry_client.aclose()
 
 
 settings = get_settings()
