@@ -681,3 +681,53 @@ def test_review_model_output_defaults(reviews: list[ReviewComment] | None) -> No
         else ReviewModelOutput(summary="s", reviews=reviews)
     )
     assert output.reviews == []
+
+
+class FakeDependencyResolver:
+    def __init__(self, findings: list[ReviewComment]) -> None:
+        self._findings = findings
+        self.received_changed_files: list[ChangedFile] | None = None
+
+    async def find_deprecated_dependencies(
+        self, changed_files: list[ChangedFile]
+    ) -> list[ReviewComment]:
+        self.received_changed_files = changed_files
+        return self._findings
+
+
+async def test_run_includes_dependency_resolver_findings_in_summary() -> None:
+    dependency_finding = ReviewComment(
+        severity="minor",
+        confidence=1.0,
+        file_path="package-lock.json",
+        line=42,
+        title="deprecated 패키지 추가/변경됨: axios@1.20.0",
+        message="npm registry: 'deprecated'",
+        evidence=['+      "version": "1.20.0",'],
+    )
+    fake_resolver = FakeDependencyResolver([dependency_finding])
+    llm = FakeLLM(ReviewModelOutput(summary="정상 diff입니다.", reviews=[]))
+    pipeline = ReviewPipeline(
+        llm, model_version="v1", prompt_version="v1", dependency_resolver=fake_resolver
+    )
+    event = _event()
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert "deprecated 패키지 추가/변경됨: axios@1.20.0" in result.summary
+    # severity=minor라 인라인 코멘트(reviews[])가 아니라 summary bullet로만 나타난다
+    assert result.reviews == []
+    assert fake_resolver.received_changed_files == event.changed_files
+
+
+async def test_run_works_without_dependency_resolver() -> None:
+    # dependency_resolver=None(기본값)이면 기존 동작 그대로 — 회귀 방지.
+    llm = FakeLLM(ReviewModelOutput(summary="정상 diff입니다.", reviews=[]))
+    pipeline = ReviewPipeline(llm, model_version="v1", prompt_version="v1")
+    event = _event()
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary == "정상 diff입니다."

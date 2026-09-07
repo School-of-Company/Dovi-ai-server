@@ -13,6 +13,7 @@ from app.review.context import build_context, extract_notion_api_spec_link, has_
 from app.review.diff import analyze
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
+    ChangedFile,
     FailureReason,
     ReviewComment,
     ReviewCompletedEvent,
@@ -221,6 +222,17 @@ class ApiSpecContextRetriever(Protocol):
         ...
 
 
+class DependencyContextResolver(Protocol):
+    async def find_deprecated_dependencies(
+        self, changed_files: list[ChangedFile]
+    ) -> list[ReviewComment]:
+        """changed_files 중 lockfile 변경분에서 deprecated 의존성을 찾는다.
+
+        실패 시 빈 리스트를 반환한다(리뷰 자체를 막지 않는다).
+        """
+        ...
+
+
 class ReviewPipeline:
     def __init__(
         self,
@@ -233,6 +245,7 @@ class ReviewPipeline:
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
+        dependency_resolver: DependencyContextResolver | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
@@ -242,6 +255,7 @@ class ReviewPipeline:
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
+        self._dependency_resolver = dependency_resolver
 
     async def run(
         self, event: ReviewRequestedEvent
@@ -279,6 +293,22 @@ class ReviewPipeline:
                 )
                 last_reason = "server_error"
                 continue
+
+            if self._dependency_resolver is not None:
+                try:
+                    dependency_findings = (
+                        await self._dependency_resolver.find_deprecated_dependencies(
+                            event.changed_files
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "dependency resolver failed reviewJobId=%s",
+                        event.review_job_id,
+                        exc_info=True,
+                    )
+                    dependency_findings = []
+                output.reviews.extend(dependency_findings)
 
             reviews = filter_reviews(output.reviews)
             if reviews:
