@@ -120,8 +120,11 @@ class NpmRegistryClient:
 
 `httpx.AsyncClient` 사용(architecture.md의 async I/O 원칙). 패키지명에
 `/`가 포함되는 scoped package(`@tanstack/query-core`)는 npm registry
-API 규칙대로 `/`를 `%2F`로 인코딩해 `https://registry.npmjs.org/@tanstack%2Fquery-core/5.102.8`
-형태로 요청한다(`urllib.parse.quote(name, safe="")`로 name 전체를 인코딩).
+API 규칙대로 `/`만 `%2F`로 인코딩하고 `@`는 그대로 둬야 한다
+(`https://registry.npmjs.org/@tanstack%2Fquery-core/5.102.8`) —
+`urllib.parse.quote(name, safe="@")`로 `@`를 인코딩 대상에서 제외한다.
+`safe=""`로 `@`까지 인코딩하면 registry가 다른 URL로 취급해 항상 404가
+난다.
 
 ### `npm_deprecation_cache.py` — Redis 캐시
 
