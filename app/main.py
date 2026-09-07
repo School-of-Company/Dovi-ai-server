@@ -103,6 +103,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 완전히 일치하지 않지만, set/get/keys를 문자열 인자로만 호출하므로 런타임에는 호환된다.
         notion_link_store = RedisNotionLinkStore(redis_client)  # type: ignore[arg-type]
 
+    dependency_resolver = None
+    if settings.dependency_check_enabled:
+        from app.context.dependency_resolver import DependencyResolver
+        from app.context.npm_deprecation_cache import RedisNpmDeprecationCache
+        from app.context.npm_registry_client import NpmRegistryClient
+
+        npm_registry_client = NpmRegistryClient()
+        npm_deprecation_cache = RedisNpmDeprecationCache(redis_client)  # type: ignore[arg-type]
+        dependency_resolver = DependencyResolver(npm_registry_client, npm_deprecation_cache)
+
     pipeline = ReviewPipeline(
         llm_client,
         model_version=settings.llm_model,
@@ -110,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         retriever=retriever,
         api_spec_retriever=api_spec_retriever,
         notion_link_store=notion_link_store,
+        dependency_resolver=dependency_resolver,
     )
 
     comment_answer_pipeline = CommentAnswerPipeline(llm_client)
