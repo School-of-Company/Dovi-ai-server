@@ -45,6 +45,22 @@ class FakeCache:
         self.store[(name, version)] = result
 
 
+class RaisingGetCache:
+    async def get(self, name: str, version: str) -> CachedResult | None:
+        raise RuntimeError("cache get exploded")
+
+    async def set(self, name: str, version: str, result: CachedResult) -> None:
+        pass
+
+
+class RaisingSetCache:
+    async def get(self, name: str, version: str) -> CachedResult | None:
+        return None
+
+    async def set(self, name: str, version: str, result: CachedResult) -> None:
+        raise RuntimeError("cache set exploded")
+
+
 def _lockfile_change(patch: str) -> ChangedFile:
     return ChangedFile(file_path="package-lock.json", status="modified", patch=patch)
 
@@ -115,3 +131,25 @@ async def test_best_effort_swallows_registry_exceptions() -> None:
     findings = await resolver.find_deprecated_dependencies([_lockfile_change(_AXIOS_BUMP_PATCH)])
 
     assert findings == []
+
+
+async def test_falls_back_to_registry_when_cache_get_raises() -> None:
+    registry = FakeRegistryClient({("axios", "1.20.0"): "axios 1.x is deprecated, use fetch"})
+    resolver = DependencyResolver(registry, RaisingGetCache())
+
+    findings = await resolver.find_deprecated_dependencies([_lockfile_change(_AXIOS_BUMP_PATCH)])
+
+    assert len(findings) == 1
+    assert "axios 1.x is deprecated, use fetch" in findings[0].message
+    # 캐시 read 실패는 미스로 취급하고 registry로 폴백
+    assert registry.calls == [("axios", "1.20.0")]
+
+
+async def test_keeps_finding_when_cache_set_raises() -> None:
+    registry = FakeRegistryClient({("axios", "1.20.0"): "axios 1.x is deprecated, use fetch"})
+    resolver = DependencyResolver(registry, RaisingSetCache())
+
+    findings = await resolver.find_deprecated_dependencies([_lockfile_change(_AXIOS_BUMP_PATCH)])
+
+    assert len(findings) == 1
+    assert "axios 1.x is deprecated, use fetch" in findings[0].message
