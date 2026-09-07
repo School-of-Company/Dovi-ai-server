@@ -31,6 +31,15 @@ services:
     ports:
       - "6379:6379"
 
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=dovi
+      - POSTGRES_PASSWORD=dovi
+      - POSTGRES_DB=dovi
+    ports:
+      - "5432:5432"
+
   qdrant:
     image: qdrant/qdrant:v1.15.1
     ports:

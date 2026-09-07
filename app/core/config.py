@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # 기본 False: registry 조회가 필요 없는 레포/환경에서도 앱이 정상 기동해야 한다.
     dependency_check_enabled: bool = False
 
+    # 기본 False: PostgreSQL이 없는 레포/환경에서도 앱이 정상 기동해야 한다.
+    # Alembic 마이그레이션(alembic/) 적용 후 .env에서 명시적으로 켠다.
+    evaluation_enabled: bool = False
+    database_url: str = "postgresql+asyncpg://dovi:dovi@localhost:5432/dovi"
+    kafka_review_feedback_topic: str = "pr.comment.reflected"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

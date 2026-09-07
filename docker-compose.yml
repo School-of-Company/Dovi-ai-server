@@ -8,12 +8,24 @@ services:
     # 마무리할 시간을 벌기 전에 SIGKILL 당하지 않는다.
     stop_grace_period: 150s
     depends_on:
+      - postgres
       - qdrant
     volumes:
       # CodeRankEmbed 등 HuggingFace 모델 가중치 캐시. 마운트 없이는 컨테이너를
       # 재생성할 때마다(배포마다) 매번 다시 다운로드해야 해서, 다운로드 경로가
       # 불안정하면(HF CDN 타임아웃 등) 배포 자체가 막힌다.
       - hf_cache:/root/.cache/huggingface
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=dovi
+      - POSTGRES_PASSWORD=dovi
+      - POSTGRES_DB=dovi
+    # 호스트 포트를 열지 않는다 — api가 컴포즈 내부 네트워크로 service명
+    # "postgres"로 접속. qdrant와 달리 호스트에서 직접 붙을 CLI 툴이 없다.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   qdrant:
     image: qdrant/qdrant:v1.15.1
@@ -25,5 +37,6 @@ services:
       - qdrant_storage:/qdrant/storage
 
 volumes:
+  postgres_data:
   qdrant_storage:
   hf_cache:
