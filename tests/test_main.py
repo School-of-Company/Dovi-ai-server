@@ -235,6 +235,153 @@ async def test_lifespan_leaves_dependency_resolver_none_when_disabled(
         get_settings.cache_clear()
 
 
+class FakeGithubReleaseClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.closed = False
+
+    async def find_release_notes(self, owner_repo: str, name: str, version: str) -> object:
+        raise AssertionError("should not be called in this test")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_lifespan_wires_official_docs_workflow_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("OFFICIAL_DOCS_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    fake_github_release_client = FakeGithubReleaseClient()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.context.github_release_client.GithubReleaseClient",
+        lambda **kwargs: fake_github_release_client,
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("official_docs_workflow") is not None
+        assert fake_github_release_client.closed
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_leaves_official_docs_workflow_none_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    # OFFICIAL_DOCS_WORKFLOW_ENABLED를 아예 설정하지 않는다 (기본 False 확인)
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert captured_kwargs.get("official_docs_workflow") is None
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_shares_npm_registry_client_across_both_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # dependency_check_enabled와 official_docs_workflow_enabled를 둘 다 켰을 때
+    # NpmRegistryClient가 한 번만 생성되는지(패키지당 registry 호출 통합 계약)
+    # 확인한다.
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("DEPENDENCY_CHECK_ENABLED", "true")
+    monkeypatch.setenv("OFFICIAL_DOCS_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    fake_npm_registry_client = FakeNpmRegistryClient()
+    fake_github_release_client = FakeGithubReleaseClient()
+    construction_count = 0
+
+    def _construct_npm_registry_client(*args: object, **kwargs: object) -> object:
+        nonlocal construction_count
+        construction_count += 1
+        return fake_npm_registry_client
+
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.context.npm_registry_client.NpmRegistryClient", _construct_npm_registry_client
+    )
+    monkeypatch.setattr(
+        "app.context.github_release_client.GithubReleaseClient",
+        lambda **kwargs: fake_github_release_client,
+    )
+
+    captured_kwargs: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert construction_count == 1
+        assert captured_kwargs.get("dependency_resolver") is not None
+        assert captured_kwargs.get("official_docs_workflow") is not None
+    finally:
+        get_settings.cache_clear()
+
+
 class FakeEvaluationRepository:
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass

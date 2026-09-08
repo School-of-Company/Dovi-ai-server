@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # 기본 False: registry 조회가 필요 없는 레포/환경에서도 앱이 정상 기동해야 한다.
     dependency_check_enabled: bool = False
 
+    # 기본 False: GitHub API 호출이 필요 없는 레포/환경에서도 앱이 정상
+    # 기동해야 한다. GITHUB_TOKEN 없이도 동작은 하지만(미인증 60회/시간),
+    # 프로덕션에서는 GITHUB_TOKEN도 함께 설정하는 걸 권장한다.
+    official_docs_workflow_enabled: bool = False
+    github_token: str = ""
+
     # 기본 False: PostgreSQL이 없는 레포/환경에서도 앱이 정상 기동해야 한다.
     # Alembic 마이그레이션(alembic/) 적용 후 .env에서 명시적으로 켠다.
     evaluation_enabled: bool = False

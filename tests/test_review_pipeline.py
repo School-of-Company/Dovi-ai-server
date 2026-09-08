@@ -762,3 +762,103 @@ async def test_run_works_without_dependency_resolver() -> None:
 
     assert isinstance(result, ReviewCompletedEvent)
     assert result.summary == "정상 diff입니다."
+
+
+class FakeOfficialDocsWorkflow:
+    def __init__(self, evidence: str) -> None:
+        self._evidence = evidence
+        self.received_changed_files: list[ChangedFile] | None = None
+
+    async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
+        self.received_changed_files = changed_files
+        return self._evidence
+
+
+async def test_run_includes_official_docs_evidence_in_prompt() -> None:
+    fake_workflow = FakeOfficialDocsWorkflow(
+        "\n\n#### 의존성 버전 변경 근거 (공식 릴리즈 노트)\naxios@1.20.0:\nFixed a bug"
+    )
+    fake_llm = FakeLLM(ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=fake_workflow
+    )
+    event = _event()
+
+    await pipeline.run(event)
+
+    assert fake_llm.received is not None
+    user_message = fake_llm.received[1]["content"]
+    assert "공식 릴리즈 노트" in user_message
+    assert "axios@1.20.0" in user_message
+    assert fake_workflow.received_changed_files == event.changed_files
+
+
+async def test_run_skips_official_docs_workflow_when_no_targets() -> None:
+    # analyze()는 package-lock.json을 targets에서 제외하므로, lockfile만 바뀐
+    # PR은 targets == []다 — official_docs_workflow는 코드 변경 자체가 있을 때만
+    # 의미가 있으므로(4단계 dependency_resolver와 달리) 이 경로에서는 호출되지
+    # 않아야 한다.
+    fake_workflow = FakeOfficialDocsWorkflow("should not appear")
+    fake_llm = FakeLLM(ReviewModelOutput(summary="unused", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=fake_workflow
+    )
+    event = _event()
+    event.changed_files = [
+        ChangedFile(file_path="package-lock.json", status="modified", patch="@@ -1 +1 @@")
+    ]
+
+    await pipeline.run(event)
+
+    assert fake_workflow.received_changed_files is None
+    assert fake_llm.call_count == 0
+
+
+async def test_run_shares_diff_budget_with_official_docs_context() -> None:
+    # official_docs_context도 같은 user 메시지에 붙으므로 diff 예산에서 빠져야
+    # 한다 — 빼지 않으면 큰 diff + 의존성 범프가 겹친 PR에서 프롬프트가
+    # LLM_MAX_CONTEXT를 넘겨 조용히 실패한다(PR #66과 같은 실패 모드).
+    large_evidence = "\n\n#### 의존성 버전 변경 근거 (공식 릴리즈 노트)\n" + "E" * 15000
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="docs/huge.md", status="added", patch=huge_patch)
+        ],
+    )
+    fake_llm = FakeLLM(ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm,
+        model_version="v",
+        prompt_version="v1",
+        official_docs_workflow=FakeOfficialDocsWorkflow(large_evidence),
+    )
+
+    await pipeline.run(event)
+
+    assert fake_llm.received is not None
+    user_message = fake_llm.received[1]["content"]
+    assert "...(truncated)" in user_message
+    # evidence(15000자 남짓) + diff 합계가 20000자 예산 안쪽이어야 한다.
+    # 예산에서 빼지 않던 예전 동작이라면 diff만으로 20000자를 채워 35000자가 됐다.
+    assert len(user_message) < 20500
+
+
+async def test_run_continues_when_official_docs_workflow_raises() -> None:
+    class BoomWorkflow:
+        async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
+            raise RuntimeError("boom")
+
+    fake_llm = FakeLLM(ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=BoomWorkflow()
+    )
+
+    result = await pipeline.run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary == "ok"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -9,6 +10,21 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _REGISTRY_BASE_URL = "https://registry.npmjs.org"
+_GITHUB_REPO_PATTERN = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
+
+
+def _extract_github_repo(repository_field: object) -> str | None:
+    url: object = None
+    if isinstance(repository_field, dict):
+        url = repository_field.get("url")
+    elif isinstance(repository_field, str):
+        url = repository_field
+    if not isinstance(url, str):
+        return None
+    match = _GITHUB_REPO_PATTERN.search(url)
+    if match is None:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
 
 
 @dataclass
@@ -19,10 +35,14 @@ class DeprecationLookupResult:
     뜻이고, `ok=True`인데 `message=None`은 조회는 성공했지만 deprecated가 아니라는
     뜻이다. 호출자(DependencyResolver)가 이 둘을 구분해야 실패를 "deprecated
     아님"으로 잘못 캐싱하지 않는다.
+
+    `github_repo`는 registry의 `repository.url` 필드에서 뽑은 "owner/repo" —
+    GitHub이 아니거나 필드가 없으면 None (5단계 OfficialDocsWorkflow가 사용).
     """
 
     ok: bool
     message: str | None
+    github_repo: str | None = None
 
 
 class NpmRegistryClient:
@@ -68,7 +88,10 @@ class NpmRegistryClient:
 
         deprecated = data.get("deprecated") if isinstance(data, dict) else None
         message = deprecated if isinstance(deprecated, str) else None
-        return DeprecationLookupResult(ok=True, message=message)
+        github_repo = (
+            _extract_github_repo(data.get("repository")) if isinstance(data, dict) else None
+        )
+        return DeprecationLookupResult(ok=True, message=message, github_repo=github_repo)
 
     async def aclose(self) -> None:
         await self._client.aclose()

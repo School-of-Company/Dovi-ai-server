@@ -93,3 +93,53 @@ async def test_returns_ok_when_response_body_is_not_a_dict() -> None:
     client = _client(handler)
     result = await client.check_deprecation("axios", "1.20.0")
     assert result == DeprecationLookupResult(ok=True, message=None)
+
+
+async def test_extracts_github_repo_from_git_plus_https_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "repository": {"type": "git", "url": "git+https://github.com/axios/axios.git"}
+            },
+        )
+
+    client = _client(handler)
+    result = await client.check_deprecation("axios", "1.20.0")
+    assert result.github_repo == "axios/axios"
+
+
+async def test_extracts_github_repo_from_git_protocol_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"repository": {"url": "git://github.com/axios/axios.git"}})
+
+    client = _client(handler)
+    result = await client.check_deprecation("axios", "1.20.0")
+    assert result.github_repo == "axios/axios"
+
+
+async def test_extracts_github_repo_from_plain_https_url_string() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"repository": "https://github.com/axios/axios"})
+
+    client = _client(handler)
+    result = await client.check_deprecation("axios", "1.20.0")
+    assert result.github_repo == "axios/axios"
+
+
+async def test_github_repo_is_none_when_repository_field_missing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"name": "axios"})
+
+    client = _client(handler)
+    result = await client.check_deprecation("axios", "1.20.0")
+    assert result.github_repo is None
+
+
+async def test_github_repo_is_none_when_repository_is_not_github() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"repository": {"url": "https://gitlab.com/foo/bar.git"}})
+
+    client = _client(handler)
+    result = await client.check_deprecation("axios", "1.20.0")
+    assert result.github_repo is None

@@ -105,17 +105,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 완전히 일치하지 않지만, set/get/keys를 문자열 인자로만 호출하므로 런타임에는 호환된다.
         notion_link_store = RedisNotionLinkStore(redis_client)  # type: ignore[arg-type]
 
+    if settings.dependency_check_enabled or settings.official_docs_workflow_enabled:
+        from app.context.npm_registry_client import NpmRegistryClient
+
+        npm_registry_client = NpmRegistryClient()
+
     dependency_resolver = None
     if settings.dependency_check_enabled:
         from app.context.dependency_resolver import DependencyResolver
         from app.context.npm_deprecation_cache import RedisNpmDeprecationCache
-        from app.context.npm_registry_client import NpmRegistryClient
 
-        npm_registry_client = NpmRegistryClient()
         # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
         # 완전히 일치하지 않지만, set/get을 문자열 인자로만 호출하므로 런타임에는 호환된다.
         npm_deprecation_cache = RedisNpmDeprecationCache(redis_client)  # type: ignore[arg-type]
+        assert npm_registry_client is not None
         dependency_resolver = DependencyResolver(npm_registry_client, npm_deprecation_cache)
+
+    github_release_client = None
+    official_docs_workflow = None
+    if settings.official_docs_workflow_enabled:
+        from app.context.github_release_client import GithubReleaseClient
+        from app.context.official_docs_workflow import OfficialDocsWorkflow
+        from app.context.release_notes_cache import RedisReleaseNotesCache
+
+        github_release_client = GithubReleaseClient(token=settings.github_token)
+        release_notes_cache = RedisReleaseNotesCache(redis_client)
+        assert npm_registry_client is not None
+        official_docs_workflow = OfficialDocsWorkflow(
+            npm_registry_client, github_release_client, release_notes_cache
+        )
 
     evaluation_repository = None
     evaluation_engine = None
@@ -146,6 +164,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         api_spec_retriever=api_spec_retriever,
         notion_link_store=notion_link_store,
         dependency_resolver=dependency_resolver,
+        official_docs_workflow=official_docs_workflow,
     )
 
     comment_answer_pipeline = CommentAnswerPipeline(llm_client)
@@ -246,6 +265,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             qdrant_client.close()
         if npm_registry_client is not None:
             await npm_registry_client.aclose()
+        if github_release_client is not None:
+            await github_release_client.aclose()
         if evaluation_engine is not None:
             await evaluation_engine.dispose()
 
