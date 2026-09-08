@@ -208,6 +208,69 @@ async def test_build_evidence_caps_at_max_packages() -> None:
         assert f"{name}@2.0.0" not in evidence
 
 
+async def test_build_evidence_caps_packages_across_multiple_lockfiles() -> None:
+    # 모노레포처럼 lockfile이 2개면, 상한은 파일당이 아니라 PR 전체(합계)에
+    # 적용돼야 한다 — 파일당 상한이면 최대 20개까지 조회하게 된다.
+    names_a = [f"a{i}" for i in range(6)]
+    names_b = [f"b{i}" for i in range(6)]
+    all_names = names_a + names_b
+    registry = FakeRegistryClient(
+        {
+            (name, "2.0.0"): DeprecationLookupResult(
+                ok=True, message=None, github_repo=f"o/{name}"
+            )
+            for name in all_names
+        }
+    )
+    release_client = FakeReleaseClient(
+        {(f"o/{name}", "2.0.0"): _Result(ok=True, notes=f"notes for {name}") for name in all_names}
+    )
+    workflow = OfficialDocsWorkflow(registry, release_client, FakeCache())
+    changed_files = [
+        ChangedFile(
+            file_path="frontend/package-lock.json",
+            status="modified",
+            patch=_make_many_packages_patch(names_a),
+        ),
+        ChangedFile(
+            file_path="backend/package-lock.json",
+            status="modified",
+            patch=_make_many_packages_patch(names_b),
+        ),
+    ]
+
+    await workflow.build_evidence(changed_files)
+
+    looked_up_names = [name for name, _ in registry.received]
+    assert len(looked_up_names) == odw._MAX_PACKAGES
+    assert looked_up_names == all_names[: odw._MAX_PACKAGES]
+
+
+async def test_build_evidence_dedupes_same_package_across_lockfiles() -> None:
+    registry = FakeRegistryClient(
+        {
+            ("axios", "2.0.0"): DeprecationLookupResult(
+                ok=True, message=None, github_repo="o/axios"
+            )
+        }
+    )
+    release_client = FakeReleaseClient(
+        {("o/axios", "2.0.0"): _Result(ok=True, notes="shared notes")}
+    )
+    workflow = OfficialDocsWorkflow(registry, release_client, FakeCache())
+    patch = _make_many_packages_patch(["axios"])
+    changed_files = [
+        ChangedFile(file_path="frontend/package-lock.json", status="modified", patch=patch),
+        ChangedFile(file_path="backend/package-lock.json", status="modified", patch=patch),
+    ]
+
+    evidence = await workflow.build_evidence(changed_files)
+
+    assert registry.received == [("axios", "2.0.0")]
+    assert release_client.received == [("o/axios", "axios", "2.0.0")]
+    assert evidence.count("axios@2.0.0") == 1
+
+
 async def test_build_evidence_truncates_notes_longer_than_per_package_limit() -> None:
     long_notes = "A" * (odw._MAX_NOTES_CHARS_PER_PACKAGE + 200)
     registry = FakeRegistryClient(

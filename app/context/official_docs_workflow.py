@@ -70,44 +70,34 @@ class OfficialDocsWorkflow:
         self._cache = cache
 
     async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
-        entries: list[str] = []
+        # 상한과 dedup은 lockfile 파일 단위가 아니라 PR(=한 번의 build_evidence)
+        # 단위로 적용한다 — 모노레포처럼 lockfile이 여러 개면 파일 단위 상한은
+        # 10 × N개까지 조회하게 되는데, 어차피 총 3000자 상한에 걸려 앞의 몇 개만
+        # 살아남으므로 나머지는 순수한 네트워크 낭비다.
+        deduped: list[tuple[ChangedFile, DependencyChange]] = []
+        seen: set[tuple[str, str]] = set()
         for file in changed_files:
             if PurePosixPath(file.file_path).name != _LOCKFILE_NAME:
                 continue
-            entries.extend(await self._collect_lockfile_evidence(file))
-        if not entries:
-            return ""
-        return _HEADER + "\n" + self._assemble(entries)
-
-    async def _collect_lockfile_evidence(self, file: ChangedFile) -> list[str]:
-        try:
-            changes = extract_dependency_changes(file.patch)
-        except Exception:
-            logger.warning(
-                "failed to parse lockfile patch path=%s", file.file_path, exc_info=True
-            )
-            return []
-
-        deduped: list[DependencyChange] = []
-        seen: set[tuple[str, str]] = set()
-        for change in changes:
-            key = (change.name, change.version)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(change)
+            for change in self._parse_lockfile(file):
+                key = (change.name, change.version)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append((file, change))
 
         if len(deduped) > _MAX_PACKAGES:
             logger.info(
-                "official docs workflow capped at %d packages for %s, skipping %d remaining",
+                "official docs workflow capped at %d packages across %d changed file(s), "
+                "skipping %d remaining",
                 _MAX_PACKAGES,
-                file.file_path,
+                len(changed_files),
                 len(deduped) - _MAX_PACKAGES,
             )
             deduped = deduped[:_MAX_PACKAGES]
 
         entries: list[str] = []
-        for change in deduped:
+        for _file, change in deduped:
             notes = await self._find_notes(change.name, change.version)
             if notes is None:
                 continue
@@ -115,7 +105,19 @@ class OfficialDocsWorkflow:
                 f"{change.name}@{change.version}:\n"
                 f"{_truncate(notes, _MAX_NOTES_CHARS_PER_PACKAGE)}"
             )
-        return entries
+
+        if not entries:
+            return ""
+        return _HEADER + "\n" + self._assemble(entries)
+
+    def _parse_lockfile(self, file: ChangedFile) -> list[DependencyChange]:
+        try:
+            return extract_dependency_changes(file.patch)
+        except Exception:
+            logger.warning(
+                "failed to parse lockfile patch path=%s", file.file_path, exc_info=True
+            )
+            return []
 
     async def _find_notes(self, name: str, version: str) -> str | None:
         try:

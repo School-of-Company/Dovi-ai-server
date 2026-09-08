@@ -10,9 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class RedisLike(Protocol):
-    def set(
-        self, name: str, value: str, nx: bool = False, ex: int | None = None
-    ) -> Awaitable[object]: ...
+    def set(self, name: str, value: str, ex: int | None = None) -> Awaitable[object]: ...
 
     def get(self, name: str) -> Awaitable[object]: ...
 

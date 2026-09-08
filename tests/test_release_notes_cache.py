@@ -8,7 +8,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {}
 
-    async def set(self, name: str, value: str, nx: bool = False, ex: int | None = None) -> object:
+    async def set(self, name: str, value: str, ex: int | None = None) -> object:
         self.store[name] = value.encode()
         return True
 

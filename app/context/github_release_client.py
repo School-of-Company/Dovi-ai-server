@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -11,6 +12,12 @@ logger = logging.getLogger(__name__)
 _GITHUB_API_BASE_URL = "https://api.github.com"
 _RAW_CONTENT_BASE_URL = "https://raw.githubusercontent.com"
 _CHANGELOG_BRANCHES = ("main", "master")
+
+
+def _is_transient_status(status_code: int) -> bool:
+    """401/403/429/5xx는 조회 자체가 완료되지 못했다는 뜻이다(인증 실패/rate
+    limit/서버 오류) — 404와 달리 "확인상 없음"이 아니므로 캐싱하면 안 된다."""
+    return status_code in (401, 403, 429) or status_code >= 500
 
 
 @dataclass
@@ -30,8 +37,13 @@ def _build_changelog_section_pattern(version: str) -> re.Pattern[str]:
     # `.`이 개행까지 흡수해 greedy 백트래킹이 문서 끝에서부터 첫 `$\n` 경계를
     # 찾아버려(즉 헤딩 바로 다음이 아니라 문서 맨 뒤 근처) 섹션 본문이 통째로
     # 사라지는 문제가 있다.
+    # 버전 뒤에 경계(`(?![\w.])`)를 요구한다 — 없으면 "1.2.3"이 "## 1.2.30"에
+    # 접두사로 매칭돼 다른 버전의 노트를 가져온다(CHANGELOG는 최신순이라 더 높은
+    # 패치 버전 헤딩이 먼저 나오는 경우가 흔하다). `v?`는 태그 조회가 `v{version}`
+    # 을 최우선으로 시도하는 것과 형식을 맞추기 위함이다.
     return re.compile(
-        rf"^##\s+\[?{escaped}\]?[^\n]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL
+        rf"^##\s+\[?v?{escaped}\]?(?![\w.])[^\n]*\n(.*?)(?=^## |\Z)",
+        re.MULTILINE | re.DOTALL,
     )
 
 
@@ -91,13 +103,24 @@ class GithubReleaseClient:
 
     async def _try_tag(self, owner_repo: str, tag: str) -> tuple[str | None, bool]:
         try:
-            response = await self._client.get(f"/repos/{owner_repo}/releases/tags/{tag}")
+            response = await self._client.get(
+                f"/repos/{quote(owner_repo, safe='/')}/releases/tags/{quote(tag, safe='')}"
+            )
         except httpx.HTTPError:
             logger.warning(
                 "github release lookup failed owner_repo=%s tag=%s",
                 owner_repo,
                 tag,
                 exc_info=True,
+            )
+            return None, True
+        if _is_transient_status(response.status_code):
+            logger.warning(
+                "github release lookup rejected owner_repo=%s tag=%s status=%s "
+                "(rate-limited/unauthorized/server error — treating as transient, not caching)",
+                owner_repo,
+                tag,
+                response.status_code,
             )
             return None, True
         if response.status_code != 200:
@@ -113,13 +136,26 @@ class GithubReleaseClient:
         had_transient_failure = False
         for branch in _CHANGELOG_BRANCHES:
             try:
-                response = await self._raw_client.get(f"/{owner_repo}/{branch}/CHANGELOG.md")
+                response = await self._raw_client.get(
+                    f"/{quote(owner_repo, safe='/')}/{branch}/CHANGELOG.md"
+                )
             except httpx.HTTPError:
                 logger.warning(
                     "changelog fetch failed owner_repo=%s branch=%s",
                     owner_repo,
                     branch,
                     exc_info=True,
+                )
+                had_transient_failure = True
+                continue
+            if _is_transient_status(response.status_code):
+                logger.warning(
+                    "changelog fetch rejected owner_repo=%s branch=%s status=%s "
+                    "(rate-limited/unauthorized/server error — treating as transient, "
+                    "not caching)",
+                    owner_repo,
+                    branch,
+                    response.status_code,
                 )
                 had_transient_failure = True
                 continue

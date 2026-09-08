@@ -365,6 +365,20 @@ GITHUB_TOKEN=
 | Redis 캐시 읽기/쓰기 실패 | 캐시 미스로 간주, live 조회로 폴백 |
 | `OfficialDocsWorkflow` 전체 예외 | pipeline이 catch, 빈 문자열 취급 — 리뷰 자체를 절대 실패시키지 않음 |
 
+401/403/429/5xx는 "확인상 없음"이 아니라 조회 미완료(transient)로 처리해
+`ok=False`를 돌려주며 캐싱하지 않는다 — 미인증 rate limit(60회/시간) 소진이
+"릴리즈 노트 없음"으로 30일간 캐시에 굳어버리는 것을 막기 위함이다. 404만
+"확인상 없음"으로 캐싱한다.
+
+## 보안 참고 — 신뢰 경계
+
+릴리즈 노트/CHANGELOG 텍스트는 패키지 게시자가 자유롭게 쓴 제3자 콘텐츠이며,
+sanitize 없이 그대로 메인 리뷰 LLM 프롬프트에 포함된다(4단계의 registry
+deprecated 메시지와 달리 — 그건 PR 코멘트에 직접 노출되므로 `_sanitize_registry_message`를
+거친다). 프롬프트 인젝션 가능성 자체는 이 기능 설계에 내재하지만(악성 패키지
+게시자가 릴리즈 노트에 임의 텍스트를 넣을 수 있음), 최종 출력은 여전히
+`result_filter.py`/`_verify()`의 기존 필터링을 거치므로 완화 경로가 있다.
+
 ## 테스트 전략
 
 - `npm_registry_client.py` 확장분: `repository.url`의 여러 실제 변형

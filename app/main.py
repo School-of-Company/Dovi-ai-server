@@ -129,9 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.context.release_notes_cache import RedisReleaseNotesCache
 
         github_release_client = GithubReleaseClient(token=settings.github_token)
-        # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
-        # 완전히 일치하지 않지만, set/get을 문자열 인자로만 호출하므로 런타임에는 호환된다.
-        release_notes_cache = RedisReleaseNotesCache(redis_client)  # type: ignore[arg-type]
+        release_notes_cache = RedisReleaseNotesCache(redis_client)
         assert npm_registry_client is not None
         official_docs_workflow = OfficialDocsWorkflow(
             npm_registry_client, github_release_client, release_notes_cache

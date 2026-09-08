@@ -590,7 +590,16 @@ class ReviewPipeline:
             self._render_target(t, related_context.get(t.file_path, [])) for t in targets
         ]
         context = build_context(event.context_files)
-        diff_budget = max(0, _MAX_DIFF_TOTAL_CHARS - len(context))
+        # api_spec_context/official_docs_context도 같은 user 메시지 뒤에 붙으므로
+        # diff 예산에서 함께 뺀다 — 빼지 않으면 큰 diff + 여러 의존성 범프가 겹친
+        # PR에서 프롬프트가 LLM_MAX_CONTEXT를 넘겨 조용히 실패한다(PR #66 사례).
+        diff_budget = max(
+            0,
+            _MAX_DIFF_TOTAL_CHARS
+            - len(context)
+            - len(api_spec_context)
+            - len(official_docs_context),
+        )
         diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         user += api_spec_context
