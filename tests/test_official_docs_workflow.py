@@ -1,3 +1,4 @@
+from app.context import official_docs_workflow as odw
 from app.context.npm_registry_client import DeprecationLookupResult
 from app.context.official_docs_workflow import OfficialDocsWorkflow
 from app.context.release_notes_cache import CachedReleaseNotes
@@ -23,8 +24,10 @@ _AXIOS_BUMP_PATCH = """\
 class FakeRegistryClient:
     def __init__(self, results: dict[tuple[str, str], DeprecationLookupResult]) -> None:
         self._results = results
+        self.received: list[tuple[str, str]] = []
 
     async def check_deprecation(self, name: str, version: str) -> DeprecationLookupResult:
+        self.received.append((name, version))
         return self._results.get((name, version), DeprecationLookupResult(ok=False, message=None))
 
 
@@ -161,3 +164,101 @@ async def test_build_evidence_caches_confirmed_absent_notes() -> None:
 
     assert evidence == ""
     assert cache.set_calls == [("axios/axios", "1.20.0", None)]
+
+
+def _make_many_packages_patch(names: list[str]) -> str:
+    """`_AXIOS_BUMP_PATCH`와 동일한 node_modules/<name> 블록을 name마다 하나씩
+    이어붙여, 여러 개의 독립된 (name, version) 변경 쌍을 갖는 lockfile patch를
+    만든다."""
+    lines = ["@@ -1,999 +1,999 @@"]
+    for name in names:
+        lines.append(f'     "node_modules/{name}": {{')
+        lines.append('-      "version": "1.0.0",')
+        lines.append('+      "version": "2.0.0",')
+        lines.append('       "license": "MIT"')
+        lines.append("     },")
+    return "\n".join(lines) + "\n"
+
+
+async def test_build_evidence_caps_at_max_packages() -> None:
+    names = [f"pkg{i}" for i in range(odw._MAX_PACKAGES + 2)]  # 12개, 상한(10)보다 2개 많음
+    registry = FakeRegistryClient(
+        {(name, "2.0.0"): DeprecationLookupResult(ok=True, message=None, github_repo=f"o/{name}")
+         for name in names}
+    )
+    release_client = FakeReleaseClient(
+        {(f"o/{name}", "2.0.0"): _Result(ok=True, notes=f"notes for {name}") for name in names}
+    )
+    workflow = OfficialDocsWorkflow(registry, release_client, FakeCache())
+    changed_files = [
+        ChangedFile(
+            file_path="package-lock.json",
+            status="modified",
+            patch=_make_many_packages_patch(names),
+        )
+    ]
+
+    evidence = await workflow.build_evidence(changed_files)
+
+    looked_up_names = [name for name, _ in registry.received]
+    assert looked_up_names == names[: odw._MAX_PACKAGES]
+    for name in names[: odw._MAX_PACKAGES]:
+        assert f"{name}@2.0.0" in evidence
+    for name in names[odw._MAX_PACKAGES :]:
+        assert f"{name}@2.0.0" not in evidence
+
+
+async def test_build_evidence_truncates_notes_longer_than_per_package_limit() -> None:
+    long_notes = "A" * (odw._MAX_NOTES_CHARS_PER_PACKAGE + 200)
+    registry = FakeRegistryClient(
+        {
+            ("axios", "1.20.0"): DeprecationLookupResult(
+                ok=True, message=None, github_repo="axios/axios"
+            )
+        }
+    )
+    release_client = FakeReleaseClient(
+        {("axios/axios", "1.20.0"): _Result(ok=True, notes=long_notes)}
+    )
+    workflow = OfficialDocsWorkflow(registry, release_client, FakeCache())
+    changed_files = [
+        ChangedFile(file_path="package-lock.json", status="modified", patch=_AXIOS_BUMP_PATCH)
+    ]
+
+    evidence = await workflow.build_evidence(changed_files)
+
+    truncated = "A" * odw._MAX_NOTES_CHARS_PER_PACKAGE + "..."
+    assert truncated in evidence
+    assert long_notes not in evidence
+    assert "A" * (odw._MAX_NOTES_CHARS_PER_PACKAGE + 1) not in evidence
+
+
+async def test_build_evidence_bounds_total_chars_across_many_packages() -> None:
+    # 패키지당 노트는 800자 상한 밑이지만(700자), 5개를 합치면 3500자 + 구분자로
+    # 3000자 총 상한을 넉넉히 넘긴다.
+    names = [f"pkg{i}" for i in range(5)]
+    per_package_notes = "B" * 700
+    registry = FakeRegistryClient(
+        {(name, "2.0.0"): DeprecationLookupResult(ok=True, message=None, github_repo=f"o/{name}")
+         for name in names}
+    )
+    release_client = FakeReleaseClient(
+        {(f"o/{name}", "2.0.0"): _Result(ok=True, notes=per_package_notes) for name in names}
+    )
+    workflow = OfficialDocsWorkflow(registry, release_client, FakeCache())
+    changed_files = [
+        ChangedFile(
+            file_path="package-lock.json",
+            status="modified",
+            patch=_make_many_packages_patch(names),
+        )
+    ]
+
+    evidence = await workflow.build_evidence(changed_files)
+
+    assert evidence.startswith(odw._HEADER + "\n")
+    assembled = evidence[len(odw._HEADER) + 1 :]
+    # "..."로 인한 최대 3자 초과분을 제외하면 조립된 엔트리 문자열은
+    # _MAX_TOTAL_CHARS를 넘지 않는다 — entry 개수가 늘어나도 초과분이
+    # 계속 커지지 않아야 한다(구분자 "\n\n" 길이도 예산에 포함돼야 함).
+    assert len(assembled) <= odw._MAX_TOTAL_CHARS + 3

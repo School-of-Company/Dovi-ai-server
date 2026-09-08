@@ -17,6 +17,9 @@ _LOCKFILE_NAME = "package-lock.json"
 # 보다 훨씬 작게 잡는다 — 토큰 예산을 직접 소비하기 때문이다.
 _MAX_PACKAGES = 10
 _MAX_NOTES_CHARS_PER_PACKAGE = 800
+# 조립된 엔트리들(_assemble의 결과)에만 적용되는 상한이다. 고정 크기의 _HEADER는
+# 여기 포함하지 않는다 — 헤더는 몇십 자 수준의 고정 라벨이라 예산에 넣어봐야
+# 실질적 이득이 없고, _assemble의 시그니처만 복잡해진다.
 _MAX_TOTAL_CHARS = 3000
 _HEADER = "\n\n#### 의존성 버전 변경 근거 (공식 릴리즈 노트)"
 
@@ -166,14 +169,19 @@ class OfficialDocsWorkflow:
         return result.notes
 
     def _assemble(self, entries: list[str]) -> str:
+        # total은 "\n\n".join(assembled) 결과의 실제 길이와 정확히 일치하도록
+        # 유지한다 — 엔트리 사이에 들어가는 "\n\n" 구분자 길이도 예산에서
+        # 미리 빼야 하며, 그렇지 않으면 엔트리 수가 늘어날수록 실제 조립된
+        # 문자열이 _MAX_TOTAL_CHARS를 계속 초과하는 폭이 커진다.
         assembled: list[str] = []
         total = 0
         for entry in entries:
-            remaining = _MAX_TOTAL_CHARS - total
+            separator_len = 2 if assembled else 0  # "\n\n"
+            remaining = _MAX_TOTAL_CHARS - total - separator_len
             if remaining <= 0:
                 break
             if len(entry) > remaining:
                 entry = entry[:remaining].rstrip() + "..."
             assembled.append(entry)
-            total += len(entry)
+            total += separator_len + len(entry)
         return "\n\n".join(assembled)
