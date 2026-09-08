@@ -55,6 +55,7 @@ jobs:
             git pull origin main
             printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
             docker compose -f docker-compose.yml pull
+            docker compose -f docker-compose.yml run --rm api uv run alembic upgrade head
             docker compose -f docker-compose.yml up -d
             docker images 'ghcr.io/school-of-company/dovi-ai-server' --format '{{.CreatedAt}}\t{{.ID}}' \
               | sort -r | awk 'NR>2' | cut -f2 | sort -u \
