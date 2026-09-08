@@ -238,6 +238,16 @@ class DependencyContextResolver(Protocol):
         ...
 
 
+class OfficialDocsContextBuilder(Protocol):
+    async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
+        """changed_files 중 lockfile 변경분에서 GitHub 릴리즈 노트/CHANGELOG
+        근거를 찾아 텍스트로 반환한다. 실패 시 빈 문자열을 반환한다(리뷰
+        자체를 막지 않는다). 판단은 하지 않는다 — 텍스트 그대로 메인 리뷰
+        LLM 프롬프트에 포함되며, breaking change 여부 판단은 LLM이 한다.
+        """
+        ...
+
+
 class ReviewPipeline:
     def __init__(
         self,
@@ -251,6 +261,7 @@ class ReviewPipeline:
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
         dependency_resolver: DependencyContextResolver | None = None,
+        official_docs_workflow: OfficialDocsContextBuilder | None = None,
     ) -> None:
         self._llm = llm
         self._model_version = model_version
@@ -261,6 +272,7 @@ class ReviewPipeline:
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
         self._dependency_resolver = dependency_resolver
+        self._official_docs_workflow = official_docs_workflow
 
     async def run(
         self, event: ReviewRequestedEvent
@@ -285,7 +297,10 @@ class ReviewPipeline:
 
         related_context = await self._retrieve_related_context(event.repository_id, targets)
         api_spec_context = await self._retrieve_api_spec_context(event, targets)
-        messages = self._build_messages(event, targets, related_context, api_spec_context)
+        official_docs_context = await self._build_official_docs_context(event)
+        messages = self._build_messages(
+            event, targets, related_context, api_spec_context, official_docs_context
+        )
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
         # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
@@ -550,12 +565,26 @@ class ReviewPipeline:
         entries = "\n\n".join(f"{r.method} {r.path}\n{r.summary}" for r in results)
         return f"\n\n#### 관련 API 명세\n{entries}"
 
+    async def _build_official_docs_context(self, event: ReviewRequestedEvent) -> str:
+        """package-lock.json 변경분에 대한 GitHub 릴리즈 노트/CHANGELOG 근거를
+        만든다. 판단은 하지 않는다 — 이 텍스트를 보고 breaking change 여부를
+        판단하는 건 메인 리뷰 LLM의 몫이다(7.5절).
+        """
+        if self._official_docs_workflow is None:
+            return ""
+        try:
+            return await self._official_docs_workflow.build_evidence(event.changed_files)
+        except Exception:
+            logger.warning("official docs workflow failed", exc_info=True)
+            return ""
+
     def _build_messages(
         self,
         event: ReviewRequestedEvent,
         targets: list[ReviewTarget],
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str = "",
+        official_docs_context: str = "",
     ) -> list[ChatMessage]:
         blocks = [
             self._render_target(t, related_context.get(t.file_path, [])) for t in targets
@@ -565,6 +594,7 @@ class ReviewPipeline:
         diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         user += api_spec_context
+        user += official_docs_context
         return [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user},

@@ -762,3 +762,69 @@ async def test_run_works_without_dependency_resolver() -> None:
 
     assert isinstance(result, ReviewCompletedEvent)
     assert result.summary == "정상 diff입니다."
+
+
+class FakeOfficialDocsWorkflow:
+    def __init__(self, evidence: str) -> None:
+        self._evidence = evidence
+        self.received_changed_files: list[ChangedFile] | None = None
+
+    async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
+        self.received_changed_files = changed_files
+        return self._evidence
+
+
+async def test_run_includes_official_docs_evidence_in_prompt() -> None:
+    fake_workflow = FakeOfficialDocsWorkflow(
+        "\n\n#### 의존성 버전 변경 근거 (공식 릴리즈 노트)\naxios@1.20.0:\nFixed a bug"
+    )
+    fake_llm = FakeLLM(ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=fake_workflow
+    )
+    event = _event()
+
+    await pipeline.run(event)
+
+    assert fake_llm.received is not None
+    user_message = fake_llm.received[1]["content"]
+    assert "공식 릴리즈 노트" in user_message
+    assert "axios@1.20.0" in user_message
+    assert fake_workflow.received_changed_files == event.changed_files
+
+
+async def test_run_skips_official_docs_workflow_when_no_targets() -> None:
+    # analyze()는 package-lock.json을 targets에서 제외하므로, lockfile만 바뀐
+    # PR은 targets == []다 — official_docs_workflow는 코드 변경 자체가 있을 때만
+    # 의미가 있으므로(4단계 dependency_resolver와 달리) 이 경로에서는 호출되지
+    # 않아야 한다.
+    fake_workflow = FakeOfficialDocsWorkflow("should not appear")
+    fake_llm = FakeLLM(ReviewModelOutput(summary="unused", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=fake_workflow
+    )
+    event = _event()
+    event.changed_files = [
+        ChangedFile(file_path="package-lock.json", status="modified", patch="@@ -1 +1 @@")
+    ]
+
+    await pipeline.run(event)
+
+    assert fake_workflow.received_changed_files is None
+    assert fake_llm.call_count == 0
+
+
+async def test_run_continues_when_official_docs_workflow_raises() -> None:
+    class BoomWorkflow:
+        async def build_evidence(self, changed_files: list[ChangedFile]) -> str:
+            raise RuntimeError("boom")
+
+    fake_llm = FakeLLM(ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(
+        fake_llm, model_version="v", prompt_version="v1", official_docs_workflow=BoomWorkflow()
+    )
+
+    result = await pipeline.run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert result.summary == "ok"
