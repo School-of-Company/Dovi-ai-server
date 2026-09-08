@@ -8,8 +8,6 @@ services:
     # 마무리할 시간을 벌기 전에 SIGKILL 당하지 않는다.
     stop_grace_period: 150s
     depends_on:
-      postgres:
-        condition: service_healthy
       # qdrant는 healthcheck가 없어 "컨테이너 시작"까지만 기다린다
       # (기존 리스트 형식 `- qdrant`와 동일한 의미).
       qdrant:
@@ -19,22 +17,6 @@ services:
       # 재생성할 때마다(배포마다) 매번 다시 다운로드해야 해서, 다운로드 경로가
       # 불안정하면(HF CDN 타임아웃 등) 배포 자체가 막힌다.
       - hf_cache:/root/.cache/huggingface
-
-  postgres:
-    image: postgres:16
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:?}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?}
-      - POSTGRES_DB=${POSTGRES_DB:?}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    # 호스트 포트를 열지 않는다 — api가 컴포즈 내부 네트워크로 service명
-    # "postgres"로 접속. qdrant와 달리 호스트에서 직접 붙을 CLI 툴이 없다.
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
 
   qdrant:
     image: qdrant/qdrant:v1.15.1
@@ -46,6 +28,5 @@ services:
       - qdrant_storage:/qdrant/storage
 
 volumes:
-  postgres_data:
   qdrant_storage:
   hf_cache:
