@@ -162,6 +162,17 @@ class FakeNpmRegistryClient:
         self.closed = True
 
 
+class FakeMavenCentralClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.closed = False
+
+    async def check_relocation(self, name: str, version: str) -> object:
+        raise AssertionError("should not be called in this test")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 async def test_lifespan_wires_dependency_resolver_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,6 +185,7 @@ async def test_lifespan_wires_dependency_resolver_when_enabled(
     fake_consumer = FakeConsumerSource()
     fake_comment_answer_consumer = FakeConsumerSource()
     fake_npm_registry_client = FakeNpmRegistryClient()
+    fake_maven_central_client = FakeMavenCentralClient()
     monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
     monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
     monkeypatch.setattr(
@@ -183,6 +195,10 @@ async def test_lifespan_wires_dependency_resolver_when_enabled(
     monkeypatch.setattr(
         "app.context.npm_registry_client.NpmRegistryClient",
         lambda *args, **kwargs: fake_npm_registry_client,
+    )
+    monkeypatch.setattr(
+        "app.context.maven_central_client.MavenCentralClient",
+        lambda *args, **kwargs: fake_maven_central_client,
     )
 
     captured_kwargs: dict[str, object] = {}
@@ -200,6 +216,7 @@ async def test_lifespan_wires_dependency_resolver_when_enabled(
 
         assert captured_kwargs.get("dependency_resolver") is not None
         assert fake_npm_registry_client.closed
+        assert fake_maven_central_client.closed
     finally:
         get_settings.cache_clear()
 

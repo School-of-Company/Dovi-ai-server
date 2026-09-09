@@ -111,16 +111,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         npm_registry_client = NpmRegistryClient()
 
+    maven_central_client = None
     dependency_resolver = None
     if settings.dependency_check_enabled:
         from app.context.dependency_resolver import DependencyResolver
+        from app.context.maven_central_client import MavenCentralClient
         from app.context.npm_deprecation_cache import RedisNpmDeprecationCache
 
         # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
         # 완전히 일치하지 않지만, set/get을 문자열 인자로만 호출하므로 런타임에는 호환된다.
         npm_deprecation_cache = RedisNpmDeprecationCache(redis_client)  # type: ignore[arg-type]
+        # RedisNpmDeprecationCache는 이름은 npm 전용이지만 동작은 범용
+        # (name, version) -> CachedResult 캐시라, Maven relocation 결과도 별도
+        # key prefix로 재사용한다.
+        maven_relocation_cache = RedisNpmDeprecationCache(
+            redis_client,  # type: ignore[arg-type]
+            key_prefix="ai-review:maven-relocation:",
+        )
+        maven_central_client = MavenCentralClient()
         assert npm_registry_client is not None
-        dependency_resolver = DependencyResolver(npm_registry_client, npm_deprecation_cache)
+        dependency_resolver = DependencyResolver(
+            npm_registry_client,
+            npm_deprecation_cache,
+            maven_client=maven_central_client,
+            maven_cache=maven_relocation_cache,
+        )
 
     github_release_client = None
     official_docs_workflow = None
@@ -283,6 +298,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             qdrant_client.close()
         if npm_registry_client is not None:
             await npm_registry_client.aclose()
+        if maven_central_client is not None:
+            await maven_central_client.aclose()
         if github_release_client is not None:
             await github_release_client.aclose()
         if evaluation_engine is not None:

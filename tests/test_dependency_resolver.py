@@ -1,6 +1,7 @@
 import pytest
 
 from app.context.dependency_resolver import DependencyResolver
+from app.context.maven_central_client import RelocationLookupResult
 from app.context.npm_deprecation_cache import CachedResult
 from app.context.npm_lockfile_diff import DependencyChange
 from app.context.npm_registry_client import DeprecationLookupResult
@@ -97,6 +98,34 @@ class RaisingSetCache:
 
 def _lockfile_change(patch: str) -> ChangedFile:
     return ChangedFile(file_path="package-lock.json", status="modified", patch=patch)
+
+
+_GSON_BUMP_PATCH = """\
+@@ -30,7 +30,7 @@
+ dependencies {
+     // JSON & Validation
+-    implementation("com.google.code.gson:gson:2.8.9")
++    implementation("com.google.code.gson:gson:2.13.1")
+"""
+
+
+def _gradle_change(patch: str, file_name: str = "build.gradle.kts") -> ChangedFile:
+    return ChangedFile(file_path=file_name, status="modified", patch=patch)
+
+
+class FakeMavenClient:
+    def __init__(self, responses: dict[tuple[str, str], str | None]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[str, str]] = []
+
+    async def check_relocation(self, name: str, version: str) -> RelocationLookupResult:
+        self.calls.append((name, version))
+        return RelocationLookupResult(ok=True, relocated_to=self._responses.get((name, version)))
+
+
+class RaisingMavenClient:
+    async def check_relocation(self, name: str, version: str) -> RelocationLookupResult:
+        raise RuntimeError("network exploded")
 
 
 async def test_creates_finding_for_deprecated_dependency() -> None:
@@ -254,3 +283,106 @@ async def test_sanitizes_untrusted_registry_message() -> None:
     assert "\n" not in message
     assert "`" not in message
     assert len(message) <= 200 + len("npm registry: ''") + len("...")
+
+
+async def test_creates_finding_for_relocated_gradle_dependency() -> None:
+    maven = FakeMavenClient(
+        {("com.google.code.gson:gson", "2.13.1"): "com.google.new:gson-renamed"}
+    )
+    resolver = DependencyResolver(
+        FakeRegistryClient({}), FakeCache(), maven_client=maven, maven_cache=FakeCache()
+    )
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == "minor"
+    assert finding.confidence == 1.0
+    assert finding.file_path == "build.gradle.kts"
+    assert "com.google.code.gson:gson" in finding.title
+    assert "com.google.new:gson-renamed" in finding.message
+    assert maven.calls == [("com.google.code.gson:gson", "2.13.1")]
+
+
+async def test_no_finding_when_gradle_dependency_not_relocated() -> None:
+    maven = FakeMavenClient({})
+    resolver = DependencyResolver(
+        FakeRegistryClient({}), FakeCache(), maven_client=maven, maven_cache=FakeCache()
+    )
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert findings == []
+
+
+async def test_ignores_gradle_build_file_when_maven_client_not_configured() -> None:
+    # maven_client를 안 넘기면(기본 None) Gradle build 파일은 그냥 무시된다 —
+    # npm 전용으로 계속 동작해야 한다.
+    resolver = DependencyResolver(FakeRegistryClient({}), FakeCache())
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert findings == []
+
+
+async def test_supports_groovy_build_gradle_file_name() -> None:
+    maven = FakeMavenClient({("com.google.code.gson:gson", "2.13.1"): "moved:gson"})
+    resolver = DependencyResolver(
+        FakeRegistryClient({}), FakeCache(), maven_client=maven, maven_cache=FakeCache()
+    )
+
+    findings = await resolver.find_deprecated_dependencies(
+        [_gradle_change(_GSON_BUMP_PATCH, file_name="build.gradle")]
+    )
+
+    assert len(findings) == 1
+
+
+async def test_gradle_best_effort_swallows_maven_exceptions() -> None:
+    resolver = DependencyResolver(
+        FakeRegistryClient({}),
+        FakeCache(),
+        maven_client=RaisingMavenClient(),
+        maven_cache=FakeCache(),
+    )
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert findings == []
+
+
+async def test_gradle_uses_maven_cache_before_calling_client() -> None:
+    maven_cache = FakeCache()
+    await maven_cache.set(
+        "com.google.code.gson:gson", "2.13.1", CachedResult(deprecated=True, message="cached:moved")
+    )
+    maven = FakeMavenClient({})
+    resolver = DependencyResolver(
+        FakeRegistryClient({}), FakeCache(), maven_client=maven, maven_cache=maven_cache
+    )
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert len(findings) == 1
+    assert "cached:moved" in findings[0].message
+    assert maven.calls == []
+
+
+async def test_gradle_relocation_failure_is_not_cached() -> None:
+    class NotOkMavenClient:
+        async def check_relocation(self, name: str, version: str) -> RelocationLookupResult:
+            return RelocationLookupResult(ok=False, relocated_to=None)
+
+    maven_cache = FakeCache()
+    resolver = DependencyResolver(
+        FakeRegistryClient({}),
+        FakeCache(),
+        maven_client=NotOkMavenClient(),
+        maven_cache=maven_cache,
+    )
+
+    findings = await resolver.find_deprecated_dependencies([_gradle_change(_GSON_BUMP_PATCH)])
+
+    assert findings == []
+    assert maven_cache.store == {}
