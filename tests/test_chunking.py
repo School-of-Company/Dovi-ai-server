@@ -39,12 +39,31 @@ _TS_PATCH_BAR = (
     "-    return x;\n+    return x + 1;"
 )
 
+_JAVA_CONTENT = """package com.example;
+
+public class Foo {
+    public int unrelated() {
+        return 0;
+    }
+
+    public int bar(int x) {
+        return x + 1;
+    }
+}
+"""
+
+_JAVA_PATCH_BAR = (
+    "@@ -7,3 +7,3 @@\n     public int bar(int x) {\n"
+    "-        return x;\n+        return x + 1;\n     }"
+)
+
 
 def test_detect_language_by_extension() -> None:
     assert detect_language("app/main.py") == "python"
     assert detect_language("src/foo.ts") == "typescript"
     assert detect_language("src/foo.tsx") == "typescript"
     assert detect_language("src/foo.js") == "javascript"
+    assert detect_language("src/Foo.java") == "java"
     assert detect_language("README.md") is None
     assert detect_language("no_extension") is None
 
@@ -83,6 +102,20 @@ def test_extract_context_chunks_typescript_includes_export_wrapper() -> None:
     assert "return x + 1;" in chunk.source
 
 
+def test_extract_context_chunks_java_returns_enclosing_method() -> None:
+    chunks = extract_context_chunks(
+        "src/main/java/com/example/Foo.java", _JAVA_CONTENT, _JAVA_PATCH_BAR
+    )
+
+    assert chunks is not None
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.node_type == "method_declaration"
+    assert chunk.name == "bar"
+    assert "return x + 1;" in chunk.source
+    assert "unrelated" not in chunk.source
+
+
 def test_extract_context_chunks_returns_none_for_unsupported_language() -> None:
     assert extract_context_chunks("app.rb", "def foo; end", "@@ -1 +1 @@\n+x") is None
 
@@ -103,6 +136,14 @@ def test_extract_all_chunks_returns_every_function_and_class() -> None:
     assert chunks is not None
     names = {c.name for c in chunks}
     assert names == {"unrelated", "Foo", "bar"}
+
+
+def test_extract_all_chunks_java_returns_class_and_methods() -> None:
+    chunks = extract_all_chunks("src/main/java/com/example/Foo.java", _JAVA_CONTENT)
+
+    assert chunks is not None
+    names = {c.name for c in chunks}
+    assert names == {"Foo", "unrelated", "bar"}
 
 
 def test_extract_all_chunks_orders_by_start_line() -> None:
