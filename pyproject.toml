@@ -18,6 +18,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.36",
     "torch>=2.12.0",
     "tree-sitter>=0.26.0",
+    "tree-sitter-java>=0.23.5",
     "tree-sitter-javascript>=0.25.0",
     "tree-sitter-python>=0.25.0",
     "tree-sitter-typescript>=0.23.2",

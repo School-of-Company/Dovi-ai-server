@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 
+import tree_sitter_java as tsjava
 import tree_sitter_javascript as tsjavascript
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
@@ -14,12 +15,20 @@ _EXTENSION_LANGUAGE = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".java": "java",
 }
 
 _BOUNDARY_NODE_TYPES: dict[str, set[str]] = {
     "python": {"function_definition", "class_definition"},
     "javascript": {"function_declaration", "class_declaration", "method_definition"},
     "typescript": {"function_declaration", "class_declaration", "method_definition"},
+    "java": {
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "method_declaration",
+        "constructor_declaration",
+    },
 }
 
 # 부모가 이 타입이면 export/decorator까지 chunk에 포함되도록 경계를 위로 넓힌다.
@@ -40,6 +49,8 @@ def _get_parser(language: str) -> Parser:
             lang = Language(tsjavascript.language())
         elif language == "typescript":
             lang = Language(tstypescript.language_typescript())
+        elif language == "java":
+            lang = Language(tsjava.language())
         else:
             raise ValueError(f"unsupported language: {language}")
         _parsers[language] = Parser(lang)
