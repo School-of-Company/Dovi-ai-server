@@ -883,3 +883,88 @@ async def test_run_continues_when_official_docs_workflow_raises() -> None:
 
     assert isinstance(result, ReviewCompletedEvent)
     assert result.summary == "ok"
+
+
+async def test_run_includes_pr_description_section_when_present() -> None:
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        pr_title="fix: postgres를 mq vm으로 이전",
+        pr_body="ai vm 로컬 postgres를 제거하고 mq vm 외부 인스턴스를 바라보게 변경.",
+        changed_files=[
+            ChangedFile(file_path="docker-compose.yml", status="modified", patch="@@ -1 +1 @@")
+        ],
+        # context_files가 있어야 "## Changes" 헤더가 붙는다(build_context()가 빈
+        # 값이면 헤더 없이 diff만 그대로 쓰인다) — 순서 검증을 위해 채워둔다.
+        context_files=[ContextFile(path="README.md", content="readme")],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "## PR Description" in user_message
+    assert "fix: postgres를 mq vm으로 이전" in user_message
+    assert "ai vm 로컬 postgres를 제거하고 mq vm 외부 인스턴스를 바라보게 변경." in user_message
+    # PR Description은 diff/context보다 앞에 와야, 모델이 diff를 보기 전에
+    # "왜 바뀌었는지" 의도를 먼저 알 수 있다.
+    assert user_message.index("## PR Description") < user_message.index("## Changes")
+
+
+async def test_run_omits_pr_description_section_when_empty() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(_event())  # _event()는 pr_title/pr_body를 안 채움 → 빈 문자열
+
+    assert fake.received is not None
+    assert "## PR Description" not in fake.received[1]["content"]
+
+
+async def test_run_truncates_long_pr_body() -> None:
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        pr_body="x" * 3000,
+        changed_files=[
+            ChangedFile(file_path="app/main.py", status="modified", patch="@@ -1 +1 @@")
+        ],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "x" * 2000 + "...(truncated)" in user_message
+    assert "x" * 2001 not in user_message
+
+
+async def test_verify_messages_inherit_pr_description_automatically() -> None:
+    # _build_verify_messages()는 별도 코드 없이 1차 user 메시지를 재사용하므로,
+    # PR Description이 검증 단계에도 자동으로 전달돼야 한다 — 이번 설계의 핵심 전제.
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        pr_title="fix: postgres를 mq vm으로 이전",
+        changed_files=[
+            ChangedFile(file_path="docker-compose.yml", status="modified", patch="@@ -1 +1 @@")
+        ],
+    )
+    finding = _comment(file_path="docker-compose.yml", severity="critical")
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[finding]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.verify_received is not None
+    assert "## PR Description" in fake.verify_received[1]["content"]
+    assert "fix: postgres를 mq vm으로 이전" in fake.verify_received[1]["content"]
