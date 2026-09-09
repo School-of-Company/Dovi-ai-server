@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     rag_collection_name: str = "dovi_code_chunks"
     embedding_model: str = "nomic-ai/CodeRankEmbed"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # rag_enabled와 함께 게이팅한다 — 인덱스를 조회할 일이 없으면 최신 상태로
+    # 유지할 필요도 없다. push 시점의 증분 재인덱싱 요청(github-app 발행)을 소비한다.
+    kafka_repo_index_request_topic: str = "repo.index.requested"
 
     # 기본 False: Notion 연동 설정이 없는 레포/환경에서도 앱이 정상 기동해야 한다.
     # DOVI.md에 Notion API 명세 DB 링크가 등록된 뒤 .env에서 명시적으로 켠다.

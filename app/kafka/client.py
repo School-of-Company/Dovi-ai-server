@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 _CONSUMER_GROUP_ID = "dovi-ai-review-engine"
 _COMMENT_ANSWER_CONSUMER_GROUP_ID = "dovi-ai-comment-answer-engine"
 _REVIEW_FEEDBACK_CONSUMER_GROUP_ID = "dovi-ai-review-feedback-engine"
+_REPO_INDEX_CONSUMER_GROUP_ID = "dovi-ai-repo-index-engine"
 
 
 def create_producer(settings: Settings) -> AIOKafkaProducer:
@@ -64,6 +65,22 @@ def create_review_feedback_consumer(settings: Settings) -> AIOKafkaConsumer:
         settings.kafka_review_feedback_topic,
         bootstrap_servers=settings.kafka_bootstrap_servers,
         group_id=_REVIEW_FEEDBACK_CONSUMER_GROUP_ID,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+    )
+
+
+def create_repo_index_consumer(settings: Settings) -> AIOKafkaConsumer:
+    logger.info(
+        "creating kafka repo-index consumer bootstrap_servers=%s topic=%s group_id=%s",
+        settings.kafka_bootstrap_servers,
+        settings.kafka_repo_index_request_topic,
+        _REPO_INDEX_CONSUMER_GROUP_ID,
+    )
+    return AIOKafkaConsumer(
+        settings.kafka_repo_index_request_topic,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        group_id=_REPO_INDEX_CONSUMER_GROUP_ID,
         enable_auto_commit=False,
         auto_offset_reset="earliest",
     )

@@ -15,6 +15,7 @@ from app.kafka.client import (
     create_comment_answer_consumer,
     create_consumer,
     create_producer,
+    create_repo_index_consumer,
     create_review_feedback_consumer,
 )
 from app.kafka.consumer import ReviewRequestConsumer
@@ -181,6 +182,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         review_feedback_kafka_consumer = create_review_feedback_consumer(settings)
         await review_feedback_kafka_consumer.start()
 
+    repo_index_kafka_consumer = None
+    if settings.rag_enabled:
+        repo_index_kafka_consumer = create_repo_index_consumer(settings)
+        await repo_index_kafka_consumer.start()
+
     # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
     # 완전히 일치하지 않지만, set/get/delete를 문자열 인자로만 호출하므로 런타임에는 호환된다.
     dedup_store = create_dedup_store(settings, redis_client)  # type: ignore[arg-type]
@@ -234,6 +240,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         )
         tasks.append(review_feedback_task)
+    if repo_index_kafka_consumer is not None:
+        from app.rag.index_consumer import RepoIndexConsumer
+
+        repo_index_consumer = RepoIndexConsumer(
+            repo_index_kafka_consumer, embedder, vector_store
+        )
+        repo_index_task = asyncio.create_task(
+            _run_consumer_forever(repo_index_consumer, shutdown_event, name="repo-index")
+        )
+        tasks.append(repo_index_task)
 
     try:
         yield
@@ -258,6 +274,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await comment_answer_kafka_consumer.stop()
         if review_feedback_kafka_consumer is not None:
             await review_feedback_kafka_consumer.stop()
+        if repo_index_kafka_consumer is not None:
+            await repo_index_kafka_consumer.stop()
         await kafka_producer.stop()
         await redis_client.aclose()
         await llm_client.aclose()
