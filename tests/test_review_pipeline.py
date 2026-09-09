@@ -162,6 +162,27 @@ def test_event_serializes_to_camel_case() -> None:
     assert data["changedFiles"][0]["filePath"] == "app/main.py"
 
 
+def test_event_pr_title_and_body_default_to_empty_string() -> None:
+    event = _event()
+    assert event.pr_title == ""
+    assert event.pr_body == ""
+
+
+def test_event_pr_title_and_body_serialize_to_camel_case() -> None:
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        pr_title="fix: postgres를 mq vm으로 이전",
+        pr_body="ai vm 로컬 postgres를 제거하고 mq vm의 외부 인스턴스를 바라보게 변경.",
+    )
+    data = event.model_dump(by_alias=True)
+    assert data["prTitle"] == "fix: postgres를 mq vm으로 이전"
+    assert data["prBody"] == "ai vm 로컬 postgres를 제거하고 mq vm의 외부 인스턴스를 바라보게 변경."
+
+
 async def test_run_returns_completed_on_success() -> None:
     output = ReviewModelOutput(summary="LGTM", reviews=[])
     fake = FakeLLM(output=output)

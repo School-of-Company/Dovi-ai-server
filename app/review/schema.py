@@ -32,6 +32,8 @@ class ReviewRequestedEvent(CamelModel):
     pr_number: int
     head_sha: str
     base_sha: str
+    pr_title: str = ""
+    pr_body: str = ""
     context_files: list[ContextFile] = []
     changed_files: list[ChangedFile] = []
 
