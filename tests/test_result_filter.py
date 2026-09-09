@@ -115,6 +115,35 @@ def test_summarize_minor_drops_empty_message() -> None:
     assert summarize_minor(reviews) == ["c: 실제 설명"]
 
 
+def test_summarize_minor_dedupes_identical_notes_across_files() -> None:
+    # PR이 파일 여러 개를 건드리면 모델이 파일마다 비슷한 minor 코멘트를 반복
+    # 생성할 수 있다 — file_path가 달라도 최종 요약 문자열이 같으면 하나만 남긴다.
+    reviews = [
+        _comment(
+            severity="minor",
+            file_path="a.py",
+            line=1,
+            title="t",
+            message="같은 내용",
+        ),
+        _comment(
+            severity="minor",
+            file_path="b.py",
+            line=1,
+            title="t",
+            message="같은 내용",
+        ),
+        _comment(
+            severity="minor",
+            file_path="c.py",
+            line=1,
+            title="t",
+            message="다른 내용",
+        ),
+    ]
+    assert summarize_minor(reviews) == ["t: 같은 내용", "t: 다른 내용"]
+
+
 def test_max_comments_limit() -> None:
     reviews = [_comment(file_path=f"f{i}.py", line=i + 1, title=str(i)) for i in range(12)]
     result = filter_reviews(reviews, max_comments=8)

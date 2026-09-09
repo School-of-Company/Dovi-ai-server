@@ -61,11 +61,22 @@ def summarize_minor(
     알 수 없는 라벨만 남는다. message(1-3문장 설명)를 함께 붙여서, title이
     부실해도 최소한의 근거가 요약에 남게 한다. message가 비어 있는 항목은
     (evidence가 빈 finding을 버리는 것과 동일하게) 노이즈이므로 제외한다.
+
+    filter_reviews()와 달리 file_path/line을 결과 문자열에 담지 않으므로, 같은
+    내용을 여러 파일에서 반복 관찰한 finding(예: PR이 파일 여러 개를 건드릴 때
+    모델이 파일마다 비슷한 minor 코멘트를 내는 경우)은 완성된 문자열 기준으로
+    중복 제거한다 — 순서는 최초 등장 순서를 유지한다.
     """
-    return [
-        f"{r.title}: {r.message}"
-        for r in reviews
-        if r.severity not in _INLINE_SEVERITIES
-        and r.confidence >= min_confidence
-        and r.message.strip()
-    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for r in reviews:
+        if r.severity in _INLINE_SEVERITIES or r.confidence < min_confidence:
+            continue
+        if not r.message.strip():
+            continue
+        note = f"{r.title}: {r.message}"
+        if note in seen:
+            continue
+        seen.add(note)
+        result.append(note)
+    return result
