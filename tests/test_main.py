@@ -115,12 +115,17 @@ async def test_lifespan_wires_rag_retriever_when_enabled(
     fake_producer = FakeStartStop()
     fake_consumer = FakeConsumerSource()
     fake_comment_answer_consumer = FakeConsumerSource()
+    fake_repo_index_consumer = FakeConsumerSource()
     fake_qdrant_client = FakeQdrantClient()
     monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
     monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
     monkeypatch.setattr(
         "app.main.create_comment_answer_consumer",
         lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr(
+        "app.main.create_repo_index_consumer",
+        lambda settings: fake_repo_index_consumer,
     )
     monkeypatch.setattr(
         "app.rag.embeddings.CodeRankEmbedClient", lambda model_name: FakeEmbedder()
