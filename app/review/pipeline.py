@@ -59,17 +59,19 @@ def _neutralize_closing_tag(text: str) -> str:
 
 
 def _truncate_diff_blocks(
-    blocks: list[str],
+    blocks: list[tuple[str, str]],
     *,
     max_file_chars: int = _MAX_DIFF_FILE_CHARS,
     max_total_chars: int = _MAX_DIFF_TOTAL_CHARS,
 ) -> str:
     truncated: list[str] = []
+    dropped_paths: list[str] = []
     total = 0
-    for i, block in enumerate(blocks):
+    for i, (file_path, block) in enumerate(blocks):
         remaining = max_total_chars - total
         if remaining <= 0:
             logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+            dropped_paths.extend(path for path, _ in blocks[i:])
             break
 
         limit = min(max_file_chars, remaining)
@@ -77,6 +79,7 @@ def _truncate_diff_blocks(
             trunc_msg = "\n...(truncated)"
             if limit < len(trunc_msg):
                 logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+                dropped_paths.extend(path for path, _ in blocks[i:])
                 break
             content_limit = limit - len(trunc_msg)
             # 코드 한 줄이 반토막 나면 LLM이 실제로 없는 문법 오류로 착각할 수 있으니,
@@ -97,7 +100,18 @@ def _truncate_diff_blocks(
         truncated.append(block)
         total += len(block)
 
-    return "\n\n".join(truncated)
+    diff = "\n\n".join(truncated)
+    if dropped_paths:
+        # 완전히 못 본 파일이 있다는 사실 자체를 LLM에게 알려준다 — 안 그러면
+        # "이 파일은 안 고쳐졌다"는 확신에 찬 오탐을 낸다(PR #84 실제 사례).
+        # 일부만 잘린 파일(위 truncated 분기)은 이미 내용 일부가 보이므로 여기
+        # 목록에는 안 들어간다 — 여긴 완전히 못 본 파일만.
+        file_list = ", ".join(dropped_paths)
+        diff += (
+            f"\n\n(크기 제한으로 생략된 파일 {len(dropped_paths)}개: {file_list} — "
+            "내용은 볼 수 없으나 변경이 있었다는 사실은 알아둘 것)"
+        )
+    return diff
 
 
 _SYSTEM_PROMPT = (
@@ -147,6 +161,13 @@ _SYSTEM_PROMPT = (
     "state in `summary` or any finding that something from `## Project "
     "Context` was added, implemented, or changed unless `## Changes` "
     "itself shows it.\n\n"
+    "`## Changes` may end with a line like '(크기 제한으로 생략된 파일 N개: "
+    "a.py, b.py — ...)' listing files whose content was omitted for size "
+    "reasons. You cannot see those files' content — never claim one of "
+    "them was not modified, not updated, or left unchanged. If it's "
+    "relevant, state in `summary` that those specific files could not be "
+    "reviewed due to size limits; never fabricate a finding about their "
+    "content.\n\n"
     "Write `summary`, `title`, `message`, and `suggestedFix` in Korean. "
     "`summary` is posted as the PR's main review comment, so it must be 1-3 "
     "concrete sentences describing what the diff actually does and your "
@@ -218,7 +239,11 @@ _VERIFY_SYSTEM_PROMPT = (
     "finding whose evidence is just the changed line itself with no "
     "stated concrete failure mode — hedged reasoning ('this may be...', "
     "'verify that...') without a specific breakage is not confirmation, "
-    "it's restating the diff.\n\n"
+    "it's restating the diff. A finding claiming a specific file was not "
+    "modified, not updated, or left unchanged is unconfirmed if that "
+    "file's content was never shown to you — check the '(크기 제한으로 "
+    "생략된 파일...)' note at the end of `## Changes` before confirming "
+    "any such claim.\n\n"
     "For every numbered finding, set `confirmed` to true only if the "
     "described problem is real and `evidence` actually supports it. Give a "
     "one-sentence `reason` either way, and set `index` to the finding's "
@@ -648,7 +673,8 @@ class ReviewPipeline:
         official_docs_context: str = "",
     ) -> list[ChatMessage]:
         blocks = [
-            self._render_target(t, related_context.get(t.file_path, [])) for t in targets
+            (t.file_path, self._render_target(t, related_context.get(t.file_path, [])))
+            for t in targets
         ]
         context = build_context(event.context_files)
         pr_section = self._build_pr_description_section(event)
