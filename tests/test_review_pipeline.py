@@ -269,29 +269,62 @@ async def test_run_includes_ast_context_chunk_when_content_available() -> None:
 def test_truncate_diff_blocks_truncates_a_single_block_over_file_limit() -> None:
     huge_block = "x" * 9000
 
-    result = _truncate_diff_blocks([huge_block], max_file_chars=8000, max_total_chars=20000)
+    result = _truncate_diff_blocks(
+        [("huge.py", huge_block)], max_file_chars=8000, max_total_chars=20000
+    )
 
     assert len(result) <= 8000
     assert result.endswith("...(truncated)")
 
 
 def test_truncate_diff_blocks_leaves_small_blocks_untouched() -> None:
-    blocks = ["small block a", "small block b"]
+    blocks = [("a.py", "small block a"), ("b.py", "small block b")]
 
     result = _truncate_diff_blocks(blocks, max_file_chars=8000, max_total_chars=20000)
 
     assert result == "small block a\n\nsmall block b"
+    assert "생략" not in result
 
 
 def test_truncate_diff_blocks_drops_later_blocks_once_total_limit_reached() -> None:
-    blocks = ["a" * 7000, "b" * 7000, "c" * 7000, "d" * 7000]
+    blocks = [
+        ("a.py", "a" * 7000),
+        ("b.py", "b" * 7000),
+        ("c.py", "c" * 7000),
+        ("d.py", "d" * 7000),
+    ]
 
     result = _truncate_diff_blocks(blocks, max_file_chars=8000, max_total_chars=20000)
 
     assert "a" * 7000 in result
     assert "b" * 7000 in result
     assert "d" * 7000 not in result
-    assert len(result) <= 20000 + len("\n...(truncated)") * 4  # 마커 여유분
+
+
+def test_truncate_diff_blocks_lists_fully_dropped_file_names_in_omission_note() -> None:
+    # c.py는 공유 예산 소진으로 일부만 잘려도 내용 일부가 보이니 "생략" 목록에는
+    # 안 들어가야 한다 — 완전히 못 본 d.py만 명시돼야 한다(PR #84에서 봇이 "안
+    # 고쳐졌다"고 오탐한 실제 사례의 재발 방지).
+    blocks = [
+        ("a.py", "a" * 7000),
+        ("b.py", "b" * 7000),
+        ("c.py", "c" * 7000),
+        ("d.py", "d" * 7000),
+    ]
+
+    result = _truncate_diff_blocks(blocks, max_file_chars=8000, max_total_chars=20000)
+
+    assert "생략된 파일 1개: d.py" in result
+    omission_note = result.split("생략된 파일")[-1]
+    assert "c.py" not in omission_note
+
+
+def test_truncate_diff_blocks_lists_multiple_dropped_files() -> None:
+    blocks = [("a.py", "a" * 15000), ("b.py", "b" * 100), ("c.py", "c" * 100)]
+
+    result = _truncate_diff_blocks(blocks, max_file_chars=20000, max_total_chars=15000)
+
+    assert "생략된 파일 2개: b.py, c.py" in result
 
 
 async def test_run_truncates_huge_single_new_file_diff() -> None:
@@ -317,6 +350,38 @@ async def test_run_truncates_huge_single_new_file_diff() -> None:
     user_message = fake.received[1]["content"]
     assert len(user_message) < len(huge_patch)
     assert "...(truncated)" in user_message
+
+
+async def test_run_lists_dropped_file_names_when_multiple_files_exceed_budget() -> None:
+    # PR #84 실제 사례: 파일이 많은 정상 규모 PR에서 예산 초과로 뒤쪽 파일들이
+    # 통째로 드롭되자, 봇이 그 파일들을 "안 고쳐졌다"고 오탐했다. 드롭된 파일명이
+    # 유저 메시지에 남아 LLM이 최소한 그 파일이 바뀌었다는 사실은 알 수 있어야 한다.
+    def _big_patch(n: int) -> str:
+        return f"@@ -0,0 +1,{n} @@\n" + "\n".join(f"+line {i}" for i in range(n))
+
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="a.py", status="modified", patch=_big_patch(1500)),
+            ChangedFile(file_path="b.py", status="modified", patch=_big_patch(1500)),
+            ChangedFile(file_path="c.py", status="modified", patch=_big_patch(1500)),
+            ChangedFile(
+                file_path="tests/test_dropped.py", status="added", patch=_big_patch(1500)
+            ),
+        ],
+    )
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "tests/test_dropped.py" in user_message
+    assert "생략된 파일" in user_message
 
 
 async def test_run_shares_diff_budget_with_project_context() -> None:
