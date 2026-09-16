@@ -439,6 +439,36 @@ async def test_run_includes_related_project_code_from_retriever() -> None:
     assert retriever.received_queries == [("@@ -1 +1 @@", 42, "app/main.py")]
 
 
+async def test_run_caps_related_project_code_size_and_keeps_diff_intact() -> None:
+    # PR #86 실제 사례: 관련 코드 섹션이 무제한이면 diff(작음)보다 훨씬 커져서
+    # 같은 파일/공유 예산을 잠식해 다른 파일이 통째로 드롭될 수 있었다. 관련
+    # 코드는 잘려도, diff 자체는 항상 온전히 남아야 한다.
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    huge_source = "x = 1\n" * 1000  # 6000자, _MAX_RELATED_CONTEXT_CHARS(2000)보다 훨씬 큼
+    retriever = FakeRetriever(
+        [
+            ChunkSearchResult(
+                file_path="app/other.py",
+                node_type="function_definition",
+                name="helper",
+                start_line=1,
+                end_line=1000,
+                source=huge_source,
+                score=0.9,
+            )
+        ]
+    )
+
+    await _pipeline(fake, retriever).run(_event())
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "@@ -1 +1 @@" in user_message  # diff 자체는 안 잘림
+    related_section = user_message.split("#### 관련 프로젝트 코드")[1]
+    assert "...(truncated)" in related_section
+    assert len(related_section) < len(huge_source)
+
+
 async def test_run_without_retriever_skips_related_context_section() -> None:
     fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
 

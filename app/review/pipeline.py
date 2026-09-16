@@ -42,6 +42,13 @@ _MAX_DIFF_TOTAL_CHARS = 20000
 # 분량은 항상 확보되어야 한다(diff가 이미 큰 PR에서도 잘리지 않아야 함).
 _MAX_PR_BODY_CHARS = 2000
 
+# "관련 프로젝트 코드"(RAG 검색 결과)는 diff를 이해하기 위한 부가 정보일 뿐인데,
+# 크기 제한이 없으면 diff보다 훨씬 커져서 같은 파일/공유 예산을 잠식할 수 있다
+# (PR #86 실제 사례 — pipeline.py의 raw diff는 3841자였지만 관련 코드 섹션이
+# 파일 캡을 넘겨 뒤쪽 파일 3개가 통째로 드롭됨). diff는 항상 우선순위를 가져야
+# 하므로, 관련 코드 섹션 자체에 diff와 독립적인 상한을 둔다.
+_MAX_RELATED_CONTEXT_CHARS = 2000
+
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
 # 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
@@ -56,6 +63,15 @@ _CLOSING_PR_DESCRIPTION_TAG = re.compile(re.escape("</pr_description>"), re.IGNO
 
 def _neutralize_closing_tag(text: str) -> str:
     return _CLOSING_PR_DESCRIPTION_TAG.sub("[REDACTED]", text)
+
+
+def _cut_at_line_boundary(text: str, content_limit: int) -> int:
+    # 코드 한 줄이 반토막 나면 LLM이 실제로 없는 문법 오류로 착각할 수 있으니,
+    # 가능하면 줄 경계에서 자른다 (경계를 못 찾으면 문자 단위로 그냥 자름).
+    cut = text.rfind("\n", 0, content_limit)
+    if cut == -1 or cut < content_limit // 2:
+        cut = content_limit
+    return cut
 
 
 def _truncate_diff_blocks(
@@ -82,11 +98,7 @@ def _truncate_diff_blocks(
                 dropped_paths.extend(path for path, _ in blocks[i:])
                 break
             content_limit = limit - len(trunc_msg)
-            # 코드 한 줄이 반토막 나면 LLM이 실제로 없는 문법 오류로 착각할 수 있으니,
-            # 가능하면 줄 경계에서 자른다 (경계를 못 찾으면 문자 단위로 그냥 자름).
-            cut = block.rfind("\n", 0, content_limit)
-            if cut == -1 or cut < content_limit // 2:
-                cut = content_limit
+            cut = _cut_at_line_boundary(block, content_limit)
             # limit이 max_file_chars가 아니라 remaining(공유 예산 소진)에 걸린
             # 경우도 있으므로, 실제로 적용된 한도가 뭔지 로그에 정확히 남긴다.
             if limit == max_file_chars:
@@ -711,5 +723,10 @@ class ReviewPipeline:
             related_section = "\n\n".join(
                 f"# {r.file_path} :: {r.name or r.node_type}\n{r.source}" for r in related
             )
+            if len(related_section) > _MAX_RELATED_CONTEXT_CHARS:
+                trunc_msg = "\n...(truncated)"
+                content_limit = _MAX_RELATED_CONTEXT_CHARS - len(trunc_msg)
+                cut = _cut_at_line_boundary(related_section, content_limit)
+                related_section = related_section[:cut] + trunc_msg
             block += f"\n\n#### 관련 프로젝트 코드\n{related_section}"
         return block
