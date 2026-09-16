@@ -11,6 +11,7 @@ dependencies = [
     "einops>=0.8.1",
     "fastapi>=0.136.3",
     "httpx>=0.28.1",
+    "langfuse>=4.15.3",
     "pydantic-settings>=2.14.1",
     "qdrant-client>=1.15.1",
     "redis>=8.1.0",

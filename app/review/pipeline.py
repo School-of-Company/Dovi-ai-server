@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Protocol
 
+from langfuse import propagate_attributes
 from pydantic import ValidationError
 
 from app.context.api_spec_link_store import NotionLinkStore
@@ -387,42 +388,48 @@ class ReviewPipeline:
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
         # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
+        # propagate_attributes로 감싸, 같은 reviewJobId의 1차 생성+2차 검증 LLM
+        # 호출이 Langfuse에서 하나의 세션으로 묶이게 한다(Langfuse 미설정 시 no-op).
         last_reason: FailureReason = "server_error"
-        for _ in range(2):
-            try:
-                output = await self._llm.generate(messages, max_tokens=self._max_tokens)
-            except TimeoutError:
-                logger.warning(
-                    "LLM timeout reviewJobId=%s", event.review_job_id
-                )
-                return self._failed(event, "timeout")
-            except (ValueError, ValidationError):
-                logger.warning(
-                    "LLM output parse_error reviewJobId=%s", event.review_job_id
-                )
-                last_reason = "parse_error"
-                continue
-            except Exception:
-                logger.exception(
-                    "unexpected error during LLM generation reviewJobId=%s",
+        with propagate_attributes(
+            session_id=event.review_job_id,
+            metadata={"repository_id": event.repository_id, "pr_number": event.pr_number},
+        ):
+            for _ in range(2):
+                try:
+                    output = await self._llm.generate(messages, max_tokens=self._max_tokens)
+                except TimeoutError:
+                    logger.warning(
+                        "LLM timeout reviewJobId=%s", event.review_job_id
+                    )
+                    return self._failed(event, "timeout")
+                except (ValueError, ValidationError):
+                    logger.warning(
+                        "LLM output parse_error reviewJobId=%s", event.review_job_id
+                    )
+                    last_reason = "parse_error"
+                    continue
+                except Exception:
+                    logger.exception(
+                        "unexpected error during LLM generation reviewJobId=%s",
+                        event.review_job_id,
+                    )
+                    last_reason = "server_error"
+                    continue
+
+                llm_reviews = list(output.reviews)
+                output.reviews.extend(dependency_findings)
+
+                reviews = filter_reviews(output.reviews)
+                if reviews:
+                    reviews = await self._verify(event, messages, reviews)
+                summary = self._build_summary(output.summary, output.reviews, llm_reviews)
+                logger.info(
+                    "review completed reviewJobId=%s reviewCount=%d",
                     event.review_job_id,
+                    len(reviews),
                 )
-                last_reason = "server_error"
-                continue
-
-            llm_reviews = list(output.reviews)
-            output.reviews.extend(dependency_findings)
-
-            reviews = filter_reviews(output.reviews)
-            if reviews:
-                reviews = await self._verify(event, messages, reviews)
-            summary = self._build_summary(output.summary, output.reviews, llm_reviews)
-            logger.info(
-                "review completed reviewJobId=%s reviewCount=%d",
-                event.review_job_id,
-                len(reviews),
-            )
-            return self._completed(event, summary, reviews)
+                return self._completed(event, summary, reviews)
 
         logger.warning(
             "review failed reviewJobId=%s reason=%s", event.review_job_id, last_reason

@@ -1,6 +1,7 @@
 import logging
 
 import httpx
+from langfuse import get_client, observe
 
 from app.llm.output_parser import parse_review_output, parse_verification_result
 from app.review.schema import ReviewModelOutput, VerificationResult
@@ -65,6 +66,7 @@ class OpenAICompatibleLLMClient:
         )
         return parse_verification_result(content)
 
+    @observe(as_type="generation", name="llm-complete")
     async def _complete(
         self,
         messages: list[ChatMessage],
@@ -72,6 +74,12 @@ class OpenAICompatibleLLMClient:
         max_tokens: int,
         response_format: dict[str, object] | None = None,
     ) -> str:
+        # generate()/generate_text()/verify_findings() 전부 이 헬퍼 하나를 거치므로,
+        # 계측 지점을 여기 한 곳에만 두면 셋 다 자동으로 트레이싱된다. Langfuse가
+        # 설정 안 돼 있으면(LANGFUSE_ENABLED=false) get_client()는 그냥 no-op이라
+        # 아래 update_current_generation 호출도 안전하게 아무 일도 안 한다.
+        get_client().update_current_generation(model=self._model, input=messages)
+
         payload: dict[str, object] = {
             "model": self._model,
             "messages": messages,
@@ -107,6 +115,14 @@ class OpenAICompatibleLLMClient:
 
         if not isinstance(content, str):
             raise ValueError(f"LLM response content is not a string: {content!r}")
+
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        usage_details: dict[str, int] = {}
+        if isinstance(usage.get("prompt_tokens"), int):
+            usage_details["input"] = usage["prompt_tokens"]
+        if isinstance(usage.get("completion_tokens"), int):
+            usage_details["output"] = usage["completion_tokens"]
+        get_client().update_current_generation(output=content, usage_details=usage_details)
 
         return content
 
