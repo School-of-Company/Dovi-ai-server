@@ -52,6 +52,9 @@ services:
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      # 단일 노드 ClickHouse — 명시적으로 꺼두지 않으면 마이그레이션이
+      # ON CLUSTER(Zookeeper 필요)로 시도되다 실패한다.
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
@@ -75,8 +78,9 @@ services:
     restart: always
     depends_on: *langfuse-depends-on
     # 방화벽이 없는 호스트라 localhost로만 열고, 볼 때는 SSH 터널로 접속한다.
+    # (예: ssh -L 80:localhost:80 -p 21114 ubuntu@ssh.gsmsv.site)
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:80:3000"
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
