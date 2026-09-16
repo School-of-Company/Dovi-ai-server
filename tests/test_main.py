@@ -583,3 +583,68 @@ async def test_lifespan_leaves_evaluation_repository_none_when_disabled(
             await asyncio.sleep(0.05)
     finally:
         get_settings.cache_clear()
+
+
+class FakeLangfuse:
+    def __init__(self, *, public_key: str, secret_key: str, host: str) -> None:
+        self.public_key = public_key
+        self.secret_key = secret_key
+        self.host = host
+        self.shut_down = False
+
+    def shutdown(self) -> None:
+        self.shut_down = True
+
+
+async def test_lifespan_wires_langfuse_client_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://langfuse.internal:3000")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    _patch_kafka_fakes(monkeypatch)
+
+    constructed: list[FakeLangfuse] = []
+
+    def _construct_langfuse(**kwargs: object) -> FakeLangfuse:
+        fake = FakeLangfuse(**kwargs)  # type: ignore[arg-type]
+        constructed.append(fake)
+        return fake
+
+    monkeypatch.setattr("langfuse.Langfuse", _construct_langfuse)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+
+        assert len(constructed) == 1
+        assert constructed[0].public_key == "pk-test"
+        assert constructed[0].secret_key == "sk-test"
+        assert constructed[0].host == "http://langfuse.internal:3000"
+        assert constructed[0].shut_down
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_leaves_langfuse_unconfigured_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    # LANGFUSE_ENABLED를 아예 설정하지 않는다 (기본 False 확인)
+    _patch_kafka_fakes(monkeypatch)
+    monkeypatch.setattr(
+        "langfuse.Langfuse",
+        lambda **kwargs: pytest.fail("must not be constructed when langfuse_enabled is False"),
+    )
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+    finally:
+        get_settings.cache_clear()

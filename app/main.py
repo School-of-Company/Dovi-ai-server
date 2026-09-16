@@ -56,6 +56,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
         return
 
+    langfuse_client = None
+    if settings.langfuse_enabled:
+        from langfuse import Langfuse
+
+        langfuse_client = Langfuse(
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            host=settings.langfuse_host,
+        )
+
     llm_client = OpenAICompatibleLLMClient(
         base_url=settings.llm_base_url,
         model=settings.llm_model,
@@ -304,6 +314,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await github_release_client.aclose()
         if evaluation_engine is not None:
             await evaluation_engine.dispose()
+        if langfuse_client is not None:
+            langfuse_client.shutdown()
 
 
 settings = get_settings()

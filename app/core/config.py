@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://dovi:dovi@localhost:5432/dovi"
     kafka_review_feedback_topic: str = "pr.comment.reflected"
 
+    # 기본 False: 자체 호스팅 Langfuse 인스턴스가 없는 레포/환경에서도 앱이 정상
+    # 기동해야 한다. Langfuse 서버(web+worker+자체 DB 스택)를 별도로 띄운 뒤
+    # .env에서 명시적으로 켠다 — 이 앱 코드가 그 서버를 배포하지는 않는다.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://localhost:3000"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

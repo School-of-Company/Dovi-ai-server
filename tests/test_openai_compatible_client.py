@@ -225,3 +225,36 @@ async def test_verify_findings_timeout_raises_builtin_timeout_error() -> None:
 
     with pytest.raises(TimeoutError):
         await client.verify_findings([{"role": "user", "content": "hi"}])
+
+
+class FakeLangfuseClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def update_current_generation(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+async def test_records_langfuse_generation_with_model_input_output_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_langfuse = FakeLangfuseClient()
+    monkeypatch.setattr(
+        "app.llm.openai_compatible_client.get_client", lambda: fake_langfuse
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _openai_response(_VALID_CONTENT)
+
+    client = _client(handler)
+    messages = [{"role": "user", "content": "hi"}]
+    await client.generate(messages)
+
+    # 첫 호출은 model/input, 두 번째 호출은 output/usage — _complete() 안에서
+    # 요청 전/후로 두 번 update한다.
+    assert len(fake_langfuse.calls) == 2
+    assert fake_langfuse.calls[0] == {"model": "test-model", "input": messages}
+    assert fake_langfuse.calls[1] == {
+        "output": _VALID_CONTENT,
+        "usage_details": {"output": 10},
+    }
