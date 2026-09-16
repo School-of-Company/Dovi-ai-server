@@ -78,8 +78,9 @@ services:
     restart: always
     depends_on: *langfuse-depends-on
     # 방화벽이 없는 호스트라 localhost로만 열고, 볼 때는 SSH 터널로 접속한다.
+    # (예: ssh -L 80:localhost:80 -p 21114 ubuntu@ssh.gsmsv.site)
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:80:3000"
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
