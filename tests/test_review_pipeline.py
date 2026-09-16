@@ -469,6 +469,41 @@ async def test_run_caps_related_project_code_size_and_keeps_diff_intact() -> Non
     assert len(related_section) < len(huge_source)
 
 
+async def test_run_caps_same_file_context_size_and_keeps_diff_intact() -> None:
+    # 이슈 #88 실제 사례: PR #86의 diff가 pipeline.py의 run()(약 3858자)처럼 큰
+    # 메서드를 건드리면, "전체 함수/클래스 컨텍스트"(같은 파일 AST 컨텍스트)가
+    # 무제한이라 그것만으로 파일 캡(8000자)을 넘겨 뒤쪽 파일들이 드롭됐다.
+    # PR #87은 "관련 프로젝트 코드"(다른 파일, RAG)만 캡을 씌워서 이 경로를
+    # 놓쳤었다 — 같은 파일 컨텍스트도 잘려도, diff 자체는 항상 온전히 남아야 한다.
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    big_body = "    x = 1\n" * 1000  # 10000자, _MAX_SAME_FILE_CONTEXT_CHARS(4500)보다 훨씬 큼
+    content = "def big_function():\n" + big_body
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(
+                file_path="app/main.py",
+                status="modified",
+                patch="@@ -2,1 +2,1 @@\n+    x = 1",
+                content=content,
+            )
+        ],
+    )
+
+    await _pipeline(fake).run(event)
+
+    assert fake.received is not None
+    user_message = fake.received[1]["content"]
+    assert "@@ -2,1 +2,1 @@" in user_message  # diff 자체는 안 잘림
+    context_section = user_message.split("#### 전체 함수/클래스 컨텍스트")[1]
+    assert "...(truncated)" in context_section
+    assert len(context_section) < len(big_body)
+
+
 async def test_run_without_retriever_skips_related_context_section() -> None:
     fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
 

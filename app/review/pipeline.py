@@ -50,6 +50,13 @@ _MAX_PR_BODY_CHARS = 2000
 # 하므로, 관련 코드 섹션 자체에 diff와 독립적인 상한을 둔다.
 _MAX_RELATED_CONTEXT_CHARS = 2000
 
+# "전체 함수/클래스 컨텍스트"(같은 파일 안에서 diff가 속한 함수/클래스 전체)는
+# 위 관련 코드보다 diff 이해에 더 직접적으로 필요한 정보라 상한을 더 넉넉하게
+# 둔다. 그래도 무제한이면 큰 메서드(예: pipeline.py의 run(), 약 3858자)만으로
+# 파일 캡(8000자)을 넘겨 같은 문제가 재발한다 (이슈 #88 — PR #87은 관련
+# 프로젝트 코드 섹션만 캡을 씌워서 이 경로는 놓쳤었음).
+_MAX_SAME_FILE_CONTEXT_CHARS = 4500
+
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
 # 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
@@ -725,6 +732,11 @@ class ReviewPipeline:
         block = f"# {target.file_path} ({target.status})\n" + "\n".join(target.hunks)
         if target.context_chunks:
             context_section = "\n\n".join(target.context_chunks)
+            if len(context_section) > _MAX_SAME_FILE_CONTEXT_CHARS:
+                trunc_msg = "\n...(truncated)"
+                content_limit = _MAX_SAME_FILE_CONTEXT_CHARS - len(trunc_msg)
+                cut = _cut_at_line_boundary(context_section, content_limit)
+                context_section = context_section[:cut] + trunc_msg
             block += f"\n\n#### 전체 함수/클래스 컨텍스트\n{context_section}"
         if related:
             related_section = "\n\n".join(
