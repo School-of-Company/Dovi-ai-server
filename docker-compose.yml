@@ -1,6 +1,9 @@
 services:
   api:
     image: ghcr.io/school-of-company/dovi-ai-server:${IMAGE_TAG:-latest}
+    # 재시작 정책이 없어서 OOM-kill 등으로 죽으면 사람이 수동으로 살릴 때까지
+    # 계속 죽어있던 사고(2026-09-20, 24시간 방치)가 있었다 — 명시적으로 걸어둔다.
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file: .env
