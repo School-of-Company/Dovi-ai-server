@@ -23,6 +23,9 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.15.1
+    # api와 같은 이유(재시작 정책 누락 사고) — 재부팅 시 SIGTERM으로 내려간 뒤
+    # 자동으로 안 돌아와 RAG가 조용히 비활성화됐던 적이 있어 명시적으로 건다.
+    restart: unless-stopped
     # 부트스트랩 인덱싱 CLI(scripts/index_repo.py)를 이 호스트에서 직접 돌릴 때만
     # 필요해서 localhost로만 연다 — 외부에 인증 없는 벡터DB를 노출하지 않는다.
     ports:
