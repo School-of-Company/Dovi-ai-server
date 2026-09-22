@@ -38,6 +38,9 @@ _NAME_NODE_TYPES = {"identifier", "type_identifier", "property_identifier"}
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+# 경계 노드를 못 찾은 변경 줄(주석/import/데코레이터 등)을 위한 fallback 윈도우 반경.
+_FALLBACK_WINDOW_RADIUS = 15
+
 _parsers: dict[str, Parser] = {}
 
 
@@ -102,6 +105,20 @@ def _extract_name(node: Node) -> str | None:
     return None
 
 
+def _merge_windows(lines: list[int], total_lines: int, radius: int) -> list[tuple[int, int]]:
+    """1-indexed 줄 번호들을 ±radius 윈도우로 감싸고, 겹치거나 맞닿은 윈도우는 합친다."""
+    intervals = sorted(
+        (max(1, line - radius), min(total_lines, line + radius)) for line in lines
+    )
+    merged: list[tuple[int, int]] = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _find_enclosing_boundary(
     root: Node, encoded_lines: list[bytes], line: int, boundary_types: set[str]
 ) -> Node | None:
@@ -157,10 +174,15 @@ def extract_context_chunks(
     encoded_lines = encoded.split(b"\n")
     seen_ranges: set[tuple[int, int]] = set()
     chunks: list[AstChunk] = []
+    orphan_lines: list[int] = []
 
     for line in sorted(changed_lines):
         node = _find_enclosing_boundary(tree.root_node, encoded_lines, line - 1, boundary_types)
         if node is None:
+            # 주석/import/데코레이터처럼 함수·클래스 경계 밖에 있는 줄이다. 여기서
+            # 그냥 버리면(continue) 그 줄만 있는 diff는 chunk가 0개가 되어 파일
+            # 내용이 리뷰에서 통째로 빠진다(#95) — 아래에서 윈도우로 fallback한다.
+            orphan_lines.append(line)
             continue
 
         target = node
@@ -181,6 +203,23 @@ def extract_context_chunks(
                 source=encoded[target.start_byte : target.end_byte].decode("utf-8"),
             )
         )
+
+    if orphan_lines:
+        total_lines = len(encoded_lines)
+        for start, end in _merge_windows(orphan_lines, total_lines, _FALLBACK_WINDOW_RADIUS):
+            key = (start, end)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            chunks.append(
+                AstChunk(
+                    node_type="fallback_window",
+                    name=None,
+                    start_line=start,
+                    end_line=end,
+                    source=b"\n".join(encoded_lines[start - 1 : end]).decode("utf-8"),
+                )
+            )
 
     return chunks or None
 

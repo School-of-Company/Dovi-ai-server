@@ -124,10 +124,47 @@ def test_extract_context_chunks_returns_none_without_changed_lines() -> None:
     assert extract_context_chunks("app/foo.py", _PY_CONTENT, "") is None
 
 
-def test_extract_context_chunks_returns_none_when_no_enclosing_boundary() -> None:
-    # 모듈 최상단 import 라인은 함수/클래스에 속하지 않는다
+def test_extract_context_chunks_falls_back_to_window_when_no_enclosing_boundary() -> None:
+    # 모듈 최상단 import 라인은 함수/클래스에 속하지 않아 경계 노드를 못 찾지만,
+    # (#95) 파일 내용이 통째로 빠지지 않도록 주변 줄을 윈도우로 감싼 chunk를 낸다.
     patch = "@@ -1,1 +1,1 @@\n-import os\n+import os, sys"
-    assert extract_context_chunks("app/foo.py", _PY_CONTENT, patch) is None
+    chunks = extract_context_chunks("app/foo.py", _PY_CONTENT, patch)
+
+    assert chunks is not None
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.node_type == "fallback_window"
+    assert chunk.name is None
+    assert "import os" in chunk.source
+
+
+def test_extract_context_chunks_comment_only_change_does_not_return_none() -> None:
+    # #95 재현: 클래스 선언 앞의 TSDoc 한 줄만 추가된 경우, 주석 노드는
+    # class_declaration 범위 밖이라 경계를 못 찾는다.
+    content = (
+        'import { Injectable } from "@nestjs/common";\n'
+        "\n"
+        "/** 설문 정의 CRUD를 담당할 서비스 레이어. 아직 로직 미구현. */\n"
+        "@Injectable()\n"
+        "export class SurveyService {}\n"
+    )
+    patch = (
+        "@@ -1,3 +1,4 @@\n"
+        ' import { Injectable } from "@nestjs/common";\n'
+        " \n"
+        "+/** 설문 정의 CRUD를 담당할 서비스 레이어. 아직 로직 미구현. */\n"
+        " @Injectable()\n"
+        " export class SurveyService {}"
+    )
+    chunks = extract_context_chunks("src/survey/survey.service.ts", content, patch)
+
+    assert chunks is not None
+    assert any("설문 정의 CRUD" in c.source for c in chunks)
+
+
+def test_extract_context_chunks_import_only_change_does_not_return_none() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-import os\n+import os, sys"
+    assert extract_context_chunks("app/foo.py", _PY_CONTENT, patch) is not None
 
 
 def test_extract_all_chunks_returns_every_function_and_class() -> None:
