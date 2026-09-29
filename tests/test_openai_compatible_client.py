@@ -257,4 +257,114 @@ async def test_records_langfuse_generation_with_model_input_output_and_usage(
     assert fake_langfuse.calls[1] == {
         "output": _VALID_CONTENT,
         "usage_details": {"output": 10},
+        "metadata": {"finish_reason": None},
     }
+
+
+async def test_generate_records_finish_reason_length_in_langfuse_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_langfuse = FakeLangfuseClient()
+    monkeypatch.setattr(
+        "app.llm.openai_compatible_client.get_client", lambda: fake_langfuse
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": _VALID_CONTENT}, "finish_reason": "length"}
+                ],
+                "usage": {"completion_tokens": 10},
+            },
+        )
+
+    client = _client(handler)
+    await client.generate([{"role": "user", "content": "hi"}])
+
+    assert fake_langfuse.calls[1]["metadata"] == {"finish_reason": "length"}
+
+
+async def test_count_tokens_calls_tokenize_on_v1_stripped_root() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"tokens": [1, 2, 3, 4, 5]})
+
+    client = _client(handler)
+    result = await client.count_tokens("hello world")
+
+    assert captured["url"] == "http://localhost:8001/tokenize"
+    assert captured["body"] == {"content": "hello world"}
+    assert result == 5
+
+
+async def test_count_tokens_raises_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = _client(handler)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.count_tokens("hello")
+
+
+async def test_count_tokens_raises_on_malformed_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    client = _client(handler)
+
+    with pytest.raises((KeyError, ValueError)):
+        await client.count_tokens("hello")
+
+
+async def test_get_context_window_prefers_per_request_n_ctx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://localhost:8001/props"
+        return httpx.Response(
+            200,
+            json={"n_ctx": 32768, "default_generation_settings": {"n_ctx": 8192}},
+        )
+
+    client = _client(handler)
+    result = await client.get_context_window()
+
+    # 요청당 실제 usable 값(default_generation_settings.n_ctx)을 최상위 값보다
+    # 우선한다 — 최상위 값은 슬롯 여러 개의 합산치일 수 있다.
+    assert result == 8192
+
+
+async def test_get_context_window_falls_back_to_top_level_n_ctx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"n_ctx": 8192})
+
+    client = _client(handler)
+    result = await client.get_context_window()
+
+    assert result == 8192
+
+
+async def test_get_context_window_returns_none_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = _client(handler)
+
+    assert await client.get_context_window() is None
+
+
+async def test_get_context_window_returns_none_when_default_generation_settings_is_null() -> (
+    None
+):
+    # 일부 llama.cpp 버전은 default_generation_settings가 null일 수 있다 —
+    # 파싱이 try 밖에서 AttributeError를 던지면 안 된다("실패하면 None" 계약).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"default_generation_settings": None})
+
+    client = _client(handler)
+
+    assert await client.get_context_window() is None

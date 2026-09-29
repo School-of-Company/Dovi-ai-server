@@ -1,10 +1,18 @@
+from collections.abc import Callable
+
 import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
 from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
-from app.review.pipeline import ReviewPipeline, _truncate_diff_blocks
+from app.review.diff import analyze
+from app.review.pipeline import (
+    _SAFETY_MARGIN_TOKENS,
+    _SYSTEM_PROMPT,
+    ReviewPipeline,
+    _truncate_diff_blocks,
+)
 from app.review.schema import (
     ChangedFile,
     ContextFile,
@@ -24,6 +32,21 @@ from app.review.schema import (
 _CONFIRM_ALL = VerificationResult(
     verdicts=[ReviewVerdict(index=i, confirmed=True, reason="ok") for i in range(20)]
 )
+
+
+def _realistic_token_counter(text: str) -> int:
+    """대략 4자/토큰 — 캐스케이드 테스트에서 시스템 프롬프트(수천 자) 자체가
+    예산을 이미 다 써버리지 않을 정도의 현실적인 비율. (1자=1토큰으로 세면
+    시스템 프롬프트 혼자만으로도 대부분의 테스트 예산을 넘겨버린다.)"""
+    return len(text) // 4 + 1
+
+
+def _llm_max_context_with_slack(*, max_tokens: int, slack_tokens: int) -> int:
+    """시스템 프롬프트 실제 크기를 반영해, "시스템 프롬프트 + slack_tokens"만큼만
+    여유가 있는 llm_max_context를 계산한다 — 시스템 프롬프트 길이가 바뀌어도
+    테스트가 깨지지 않게 하드코딩된 매직 넘버 대신 실측 기반으로 계산한다."""
+    system_tokens = _realistic_token_counter(_SYSTEM_PROMPT)
+    return system_tokens + max_tokens + _SAFETY_MARGIN_TOKENS + slack_tokens
 
 
 def _comment(
@@ -55,15 +78,32 @@ class FakeLLM:
         sequence: list[ReviewModelOutput | Exception] | None = None,
         verify_result: VerificationResult | None = None,
         verify_error: Exception | None = None,
+        token_counter: Callable[[str], int] | None = None,
+        context_window: int | None = None,
     ) -> None:
+        self.verify_calls: list[list[ChatMessage]] = []
         self._output = output
         self._error = error
         self._sequence = sequence
         self._verify_result = verify_result if verify_result is not None else _CONFIRM_ALL
         self._verify_error = verify_error
+        # 기본은 항상 "예산 안"(작은 고정값)으로 잡아, 이번 토큰 예산 기능이
+        # 없던 기존 테스트들이 축소 캐스케이드 없이 그대로 통과하게 한다(회귀
+        # 없음 보장). 캐스케이드/실패 경로를 직접 테스트하는 케이스만
+        # token_counter를 넘겨 실제 길이에 비례하게 만든다.
+        self._token_counter = token_counter
+        self._context_window = context_window
         self.received: list[ChatMessage] | None = None
         self.verify_received: list[ChatMessage] | None = None
         self.call_count = 0
+
+    async def count_tokens(self, text: str) -> int:
+        if self._token_counter is not None:
+            return self._token_counter(text)
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return self._context_window
 
     async def generate(
         self, messages: list[ChatMessage], *, max_tokens: int = 1500
@@ -86,6 +126,7 @@ class FakeLLM:
         self, messages: list[ChatMessage], *, max_tokens: int = 800
     ) -> VerificationResult:
         self.verify_received = messages
+        self.verify_calls.append(messages)
         if self._verify_error is not None:
             raise self._verify_error
         return self._verify_result
@@ -1143,3 +1184,274 @@ async def test_verify_messages_inherit_pr_description_automatically() -> None:
     assert fake.verify_received is not None
     assert "## PR Description" in fake.verify_received[1]["content"]
     assert "fix: postgres를 mq vm으로 이전" in fake.verify_received[1]["content"]
+
+
+# --- 이슈 #98: 토큰 기준 프롬프트 예산 ---------------------------------------
+
+
+async def test_assemble_within_budget_matches_build_messages_when_under_budget() -> None:
+    """예산 안에 들면 _assemble_within_budget()이 _build_messages()의 1차 조립
+    결과를 그대로 반환해야 한다 — 이번 변경이 기존 프롬프트를 안 건드린다는
+    핵심 전제(회귀 없음)."""
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        token_counter=lambda text: 1,  # 항상 예산 안
+    )
+    pipeline = _pipeline(fake)
+    event = _event()
+
+    await pipeline.run(event)
+
+    assert fake.received is not None
+    targets = analyze(event)
+    expected_messages, _ = pipeline._build_messages(event, targets, {})
+    assert fake.received == expected_messages
+
+
+async def test_assemble_within_budget_reduces_official_docs_before_diff() -> None:
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        token_counter=_realistic_token_counter,
+    )
+    llm_max_context = _llm_max_context_with_slack(max_tokens=100, slack_tokens=100)
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=100,
+    )
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="app/main.py", status="modified", patch="@@ -1 +1 @@\n-a\n+b")
+        ],
+    )
+    targets = analyze(event)
+    official_docs_context = "\n\n#### 근거\n" + ("공식문서" * 200)
+
+    messages = await pipeline._assemble_within_budget(
+        event, targets, {}, "", official_docs_context
+    )
+
+    assert messages is not None
+    user = messages[1]["content"]
+    # 보조 정보(official_docs)는 잘리고, diff는 그대로 남아야 한다.
+    assert official_docs_context not in user
+    assert "@@ -1 +1 @@" in user
+    assert "+b" in user
+
+
+async def test_assemble_within_budget_reduces_context_before_diff() -> None:
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        token_counter=_realistic_token_counter,
+    )
+    llm_max_context = _llm_max_context_with_slack(max_tokens=100, slack_tokens=100)
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=100,
+    )
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="app/main.py", status="modified", patch="@@ -1 +1 @@\n-a\n+b")
+        ],
+        context_files=[ContextFile(path="DOVI.md", content="프로젝트 설명 " * 300)],
+    )
+    targets = analyze(event)
+
+    messages = await pipeline._assemble_within_budget(event, targets, {}, "", "")
+
+    assert messages is not None
+    user = messages[1]["content"]
+    assert "...(truncated)" in user  # 프로젝트 컨텍스트가 잘림
+    assert "@@ -1 +1 @@" in user
+    assert "+b" in user  # diff는 안 잘림
+
+
+async def test_assemble_within_budget_never_fails_for_naturally_small_diff() -> None:
+    """원래 diff가 이미 _MIN_DIFF_TOKENS보다 작은 PR은, 다른 보조 정보가 아무리
+    커도 diff 자체가 실패 원인이 되면 안 된다(diff_floor 보정)."""
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        token_counter=_realistic_token_counter,
+    )
+    llm_max_context = _llm_max_context_with_slack(max_tokens=50, slack_tokens=100)
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=50,
+    )
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="app/main.py", status="modified", patch="@@ -1 +1 @@\n-a\n+b")
+        ],
+    )
+    targets = analyze(event)
+    official_docs_context = "매우 긴 근거 텍스트 " * 200  # 이것만으로도 예산 초과
+
+    messages = await pipeline._assemble_within_budget(
+        event, targets, {}, "", official_docs_context
+    )
+
+    assert messages is not None  # official_docs를 줄여서 해결돼야지, 실패하면 안 된다
+    assert "@@ -1 +1 @@" in messages[1]["content"]
+
+
+async def test_assemble_within_budget_returns_none_when_even_diff_floor_is_not_enough() -> None:
+    """모든 보조 정보를 최소로 줄이고 diff까지 floor로 줄여도 여전히 초과하면,
+    조용히 잘린 프롬프트를 보내는 대신 None을 반환해야 한다(호출자가
+    context_overflow로 실패 처리)."""
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]), token_counter=len)
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", llm_max_context=50, max_tokens=10
+    )
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="docs/huge.md", status="added", patch=huge_patch)
+        ],
+    )
+    targets = analyze(event)
+
+    messages = await pipeline._assemble_within_budget(event, targets, {}, "", "")
+
+    assert messages is None
+
+
+async def test_run_fails_with_context_overflow_when_budget_cannot_be_met() -> None:
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]), token_counter=len)
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="docs/huge.md", status="added", patch=huge_patch)
+        ],
+    )
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", llm_max_context=50, max_tokens=10
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewFailedEvent)
+    assert result.reason == "context_overflow"
+    assert fake.call_count == 0  # LLM 생성 호출 자체가 안 나가야 한다
+
+
+async def test_verify_splits_findings_into_batches_and_merges_by_original_index() -> None:
+    """finding 텍스트가 예산에 다 안 들어가면 배치로 나눠 순차 검증하고 원래
+    index로 병합해야 한다 — 텍스트를 잘라 index-판정 대응이 깨지면 안 된다."""
+    findings = [
+        _comment(severity="critical", title=f"finding-{i}", message="x" * 50, file_path="a.py")
+        for i in range(4)
+    ]
+    verify_result = VerificationResult(
+        verdicts=[ReviewVerdict(index=i, confirmed=(i % 2 == 0), reason="r") for i in range(4)]
+    )
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        verify_result=verify_result,
+        token_counter=lambda text: 1,
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=250,
+        max_tokens=10,
+        verify_max_tokens=10,
+    )
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "diff"},
+    ]
+
+    confirmed = await pipeline._verify(_event(), messages, findings)
+
+    assert len(fake.verify_calls) == 4  # 예산이 좁아 finding마다 배치가 나뉨
+    assert confirmed == [findings[0], findings[2]]
+
+
+async def test_verify_batch_cap_discards_remaining_findings() -> None:
+    findings = [
+        _comment(severity="critical", title=f"f{i}", message="x" * 50, file_path="a.py")
+        for i in range(8)
+    ]
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]),
+        verify_result=VerificationResult(
+            verdicts=[ReviewVerdict(index=i, confirmed=True, reason="r") for i in range(8)]
+        ),
+        token_counter=lambda text: 1,
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=250,
+        max_tokens=10,
+        verify_max_tokens=10,
+    )
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "diff"},
+    ]
+
+    confirmed = await pipeline._verify(_event(), messages, findings)
+
+    assert len(fake.verify_calls) == 5  # _MAX_VERIFY_BATCHES
+    assert len(confirmed) == 5  # 나머지 3개는 검증 없이 폐기
+
+
+async def test_resolve_max_context_only_caches_successful_result() -> None:
+    class FlakyContextLLM(FakeLLM):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            self.context_window_calls = 0
+
+        async def get_context_window(self) -> int | None:
+            self.context_window_calls += 1
+            if self.context_window_calls == 1:
+                return None  # 첫 호출은 실패(서버가 아직 기동 중인 경우 등)
+            return 4096  # 재시도부터는 성공
+
+    fake = FlakyContextLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = ReviewPipeline(fake, model_version="v", prompt_version="v1", llm_max_context=8192)
+
+    first = await pipeline._resolve_max_context()
+    second = await pipeline._resolve_max_context()
+    third = await pipeline._resolve_max_context()
+
+    assert first == 8192  # 실패 → 설정값 폴백(캐시 안 됨)
+    assert second == 4096  # 재시도 성공 → /props 값 사용
+    assert third == 4096  # 성공한 값은 캐시되어 재호출 안 됨
+    assert fake.context_window_calls == 2

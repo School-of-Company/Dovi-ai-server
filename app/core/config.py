@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     llm_max_context: int = 8192
     llm_gpu_layers: int = -1
     llm_timeout_seconds: float = 120.0
+    # ReviewPipeline의 기존 기본값과 동일 — 설정값으로 분리해 배포 환경별로
+    # 조정 가능하게 한다(이슈 #98).
+    llm_max_tokens: int = 1500
+    llm_verify_max_tokens: int = 800
 
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)

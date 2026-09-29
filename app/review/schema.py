@@ -5,7 +5,7 @@ from pydantic.alias_generators import to_camel
 
 Severity = Literal["critical", "major", "minor", "suggestion"]
 FileStatus = Literal["added", "modified", "removed", "renamed"]
-FailureReason = Literal["parse_error", "timeout", "server_error"]
+FailureReason = Literal["parse_error", "timeout", "server_error", "context_overflow"]
 
 
 class CamelModel(BaseModel):

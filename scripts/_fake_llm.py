@@ -30,3 +30,9 @@ class FakeLLM:
         return VerificationResult(
             verdicts=[ReviewVerdict(index=0, confirmed=True, reason="[FAKE] ok")]
         )
+
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None

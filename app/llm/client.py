@@ -19,3 +19,22 @@ class LLMClient(Protocol):
             ValueError: 응답 파싱 또는 검증 실패 (pydantic ValidationError 포함)
         """
         ...
+
+    async def count_tokens(self, text: str) -> int:
+        """text의 실제 토큰 수를 센다 (이슈 #98 — 문자 수 기반 예산으로는 한글/
+        코드 혼합 텍스트에서 컨텍스트 초과를 보장 못 함).
+
+        실패하면 예외를 그대로 던진다 — 폴백(보수적 추정)은 호출자(파이프라인)의
+        책임이다.
+        """
+        ...
+
+    async def get_context_window(self) -> int | None:
+        """서버가 실제로 쓸 수 있는 컨텍스트 크기(usable n_ctx)를 반환한다.
+
+        설정값(`llm_max_context`)이 서버 실행 옵션과 어긋날 수 있어(예: 병렬
+        슬롯 수에 따라 요청당 usable 컨텍스트가 설정값보다 작을 수 있음), 서버가
+        직접 보고하는 값을 우선한다. 조회할 수 없으면 None을 반환한다(예외를
+        던지지 않는다 — 호출자는 항상 설정값으로 폴백할 수 있어야 한다).
+        """
+        ...

@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import logging
+import math
 import re
 from typing import Protocol
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 from app.context.api_spec_link_store import NotionLinkStore
 from app.llm.client import ChatMessage, LLMClient
+from app.llm.tokens import estimate_tokens
 from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
@@ -57,6 +59,28 @@ _MAX_RELATED_CONTEXT_CHARS = 2000
 # 프로젝트 코드 섹션만 캡을 씌워서 이 경로는 놓쳤었음).
 _MAX_SAME_FILE_CONTEXT_CHARS = 4500
 
+# 위 문자 기반 예산들은 "1차 조립"에만 쓰인다(무변경 — 이슈 #98 회귀 없음
+# 보장의 근거). 실제 최종 안전판은 조립 후 실측 토큰 수를 기준으로 하는
+# 아래 값들이다.
+#
+# 조립된 프롬프트(시스템+유저)의 실측(또는 실패 시 폴백 추정) 토큰 수가
+# `llm_max_context - max_tokens - _SAFETY_MARGIN_TOKENS`를 넘으면 축소 단계가
+# 개입한다. 여유분은 chat template의 role 마커 등 content 문자열만 세서는
+# 안 잡히는 토큰을 위한 것 — 초기값이며 배포 후 실측(finish_reason 비율)으로
+# 조정한다.
+_SAFETY_MARGIN_TOKENS = 200
+
+# 모든 보조 정보(공식 문서/API 명세/프로젝트 컨텍스트/PR 본문)를 최소로 줄여도
+# 예산을 못 맞추면 diff까지 줄여야 하는데, diff는 리뷰 대상 자체라 이 밑으로는
+# 줄이지 않는다 — 그 지점에서도 넘치면 context_overflow로 명시적으로 실패
+# 처리한다(조용히 잘린 프롬프트를 보내지 않는다).
+_MIN_DIFF_TOKENS = 500
+
+# verify()가 finding들을 배치로 나눠 검증할 때, 배치 수가 이 이상으로 늘어나면
+# (LLM 호출 1회당 평균 십수 초가 추가되므로) 더 쪼개지 않고 남은 finding은
+# 검증 없이 폐기한다(기존 "검증 불확실하면 보수적으로 버린다" 철학과 일관).
+_MAX_VERIFY_BATCHES = 5
+
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
 # 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
@@ -80,6 +104,24 @@ def _cut_at_line_boundary(text: str, content_limit: int) -> int:
     if cut == -1 or cut < content_limit // 2:
         cut = content_limit
     return cut
+
+
+def _shrink_to_char_limit(text: str, target_chars: int) -> str:
+    """text를 target_chars 이하로 줄 경계에서 자르고 잘림 표시를 붙인다.
+
+    이미 target_chars 이내면 그대로 반환한다 — 축소 캐스케이드가 각 섹션을
+    반복적으로 더 작은 목표치로 재조립할 때 쓰는 범용 헬퍼.
+    """
+    if target_chars <= 0:
+        return ""
+    if len(text) <= target_chars:
+        return text
+    trunc_msg = "\n...(truncated)"
+    if target_chars < len(trunc_msg):
+        return ""
+    content_limit = target_chars - len(trunc_msg)
+    cut = _cut_at_line_boundary(text, content_limit)
+    return text[:cut] + trunc_msg
 
 
 def _truncate_diff_blocks(
@@ -285,7 +327,7 @@ class VerifyingLLM(Protocol):
 
 
 class ReviewLLM(LLMClient, VerifyingLLM, Protocol):
-    """ReviewPipeline이 필요로 하는 전체 인터페이스 (생성 + 자체 검증)."""
+    """ReviewPipeline이 필요로 하는 전체 인터페이스 (생성 + 자체 검증 + 토큰 예산)."""
 
 
 class ContextRetriever(Protocol):
@@ -346,6 +388,7 @@ class ReviewPipeline:
         *,
         model_version: str,
         prompt_version: str,
+        llm_max_context: int = 8192,
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
         retriever: ContextRetriever | None = None,
@@ -357,6 +400,7 @@ class ReviewPipeline:
         self._llm = llm
         self._model_version = model_version
         self._prompt_version = prompt_version
+        self._llm_max_context = llm_max_context
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
         self._retriever = retriever
@@ -364,6 +408,10 @@ class ReviewPipeline:
         self._api_spec_retriever = api_spec_retriever
         self._dependency_resolver = dependency_resolver
         self._official_docs_workflow = official_docs_workflow
+        # /props로 확인한 실제 usable 컨텍스트 — 성공한 값만 캐시한다(실패는
+        # 캐시하지 않아, 서버가 막 기동 중이라 일시적으로 실패했어도 다음
+        # 리뷰에서 재시도한다).
+        self._effective_max_context: int | None = None
 
     async def run(
         self, event: ReviewRequestedEvent
@@ -389,9 +437,16 @@ class ReviewPipeline:
         related_context = await self._retrieve_related_context(event.repository_id, targets)
         api_spec_context = await self._retrieve_api_spec_context(event, targets)
         official_docs_context = await self._build_official_docs_context(event)
-        messages = self._build_messages(
+        messages = await self._assemble_within_budget(
             event, targets, related_context, api_spec_context, official_docs_context
         )
+        if messages is None:
+            logger.warning(
+                "prompt exceeds context budget even after reducing all sections "
+                "reviewJobId=%s",
+                event.review_job_id,
+            )
+            return self._failed(event, "context_overflow")
 
         # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
         # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
@@ -503,38 +558,58 @@ class ReviewPipeline:
     ) -> list[ReviewComment]:
         """critical/major finding들을 diff에 비추어 다시 검증해, 확인된 것만 남긴다.
 
-        검증 호출 자체가 실패하면 원본을 그대로 노출하는 대신 보수적으로 이번
-        배치를 전부 폐기한다 (노션 "리뷰 결과 자체 검증" 문서 참고).
+        finding 텍스트 전체가 예산(컨텍스트 한도)에 안 들어갈 수 있다 — 텍스트를
+        중간에서 자르면 번호-판정 대응이 깨지므로, 대신 예산에 맞게 배치로 나눠
+        순차 검증하고 원래 index 기준으로 병합한다(이슈 #98). 배치 검증 호출
+        자체가 실패하면 그 배치는 보수적으로 전부 폐기한다(노션 "리뷰 결과 자체
+        검증" 문서 참고).
         """
-        verify_messages = self._build_verify_messages(messages, reviews)
-        try:
-            result = await self._llm.verify_findings(
-                verify_messages, max_tokens=self._verify_max_tokens
-            )
-        except Exception:
-            logger.exception(
-                "verification LLM call failed reviewJobId=%s, discarding "
-                "findings defensively",
-                event.review_job_id,
-            )
-            return []
+        effective_max_context = await self._resolve_max_context()
+        budget = effective_max_context - self._verify_max_tokens - _SAFETY_MARGIN_TOKENS
+        diff_and_context = messages[1]["content"]
+        base_tokens = await self._count_tokens(diff_and_context)
 
-        verdict_by_index = {v.index: v for v in result.verdicts}
+        batches = self._split_findings_into_batches(event, reviews, base_tokens, budget)
+        if len(batches) > _MAX_VERIFY_BATCHES:
+            dropped = sum(len(batch) for batch in batches[_MAX_VERIFY_BATCHES:])
+            logger.warning(
+                "verify batch cap exceeded reviewJobId=%s droppedFindings=%d",
+                event.review_job_id,
+                dropped,
+            )
+            batches = batches[:_MAX_VERIFY_BATCHES]
+
         confirmed: list[ReviewComment] = []
         disputed = 0
-        for i, review in enumerate(reviews):
-            verdict = verdict_by_index.get(i)
-            if verdict is not None and verdict.confirmed:
-                confirmed.append(review)
+        for batch in batches:
+            verify_messages = self._build_verify_messages(messages, batch)
+            try:
+                result = await self._llm.verify_findings(
+                    verify_messages, max_tokens=self._verify_max_tokens
+                )
+            except Exception:
+                logger.exception(
+                    "verification LLM call failed reviewJobId=%s, discarding "
+                    "batch defensively",
+                    event.review_job_id,
+                )
+                disputed += len(batch)
                 continue
-            disputed += 1
-            logger.info(
-                "finding disputed reviewJobId=%s file=%s title=%s reason=%s",
-                event.review_job_id,
-                review.file_path,
-                review.title,
-                verdict.reason if verdict is not None else "no verdict returned",
-            )
+
+            verdict_by_index = {v.index: v for v in result.verdicts}
+            for i, review in batch:
+                verdict = verdict_by_index.get(i)
+                if verdict is not None and verdict.confirmed:
+                    confirmed.append(review)
+                    continue
+                disputed += 1
+                logger.info(
+                    "finding disputed reviewJobId=%s file=%s title=%s reason=%s",
+                    event.review_job_id,
+                    review.file_path,
+                    review.title,
+                    verdict.reason if verdict is not None else "no verdict returned",
+                )
 
         if disputed:
             logger.info(
@@ -545,12 +620,54 @@ class ReviewPipeline:
             )
         return confirmed
 
+    def _split_findings_into_batches(
+        self,
+        event: ReviewRequestedEvent,
+        reviews: list[ReviewComment],
+        base_tokens: int,
+        budget: int,
+    ) -> list[list[tuple[int, ReviewComment]]]:
+        """reviews를 (원래 index, review) 쌍으로 유지하면서, 각 배치가 diff_and_context
+        + 그 배치의 finding들 합쳐서 budget을 넘지 않도록 나눈다.
+
+        finding 하나가 그 자체로도 예산을 넘으면(diff/컨텍스트가 이미 예산을
+        거의 다 썼을 때) 그 finding은 검증 없이 폐기한다 — 어느 배치에 넣어도
+        예산 초과인 요청을 보낼 수는 없다. 배치를 가르는 용도라 실제 /tokenize
+        대신 보수적 폴백 추정만으로 충분하다(항상 과다추정이라 배치가 실제보다
+        더 잘게 나뉠 뿐, 예산을 넘기는 방향으로는 틀리지 않는다).
+        """
+        batches: list[list[tuple[int, ReviewComment]]] = []
+        current: list[tuple[int, ReviewComment]] = []
+        current_tokens = base_tokens
+        for i, review in enumerate(reviews):
+            finding_tokens = estimate_tokens(self._render_finding(i, review))
+            if base_tokens + finding_tokens > budget:
+                logger.warning(
+                    "finding too large to verify even alone, discarding "
+                    "reviewJobId=%s file=%s title=%s",
+                    event.review_job_id,
+                    review.file_path,
+                    review.title,
+                )
+                continue
+            if current and current_tokens + finding_tokens > budget:
+                batches.append(current)
+                current = []
+                current_tokens = base_tokens
+            current.append((i, review))
+            current_tokens += finding_tokens
+        if current:
+            batches.append(current)
+        return batches
+
     def _build_verify_messages(
-        self, original_messages: list[ChatMessage], reviews: list[ReviewComment]
+        self,
+        original_messages: list[ChatMessage],
+        indexed_reviews: list[tuple[int, ReviewComment]],
     ) -> list[ChatMessage]:
         diff_and_context = original_messages[1]["content"]
         findings = "\n\n".join(
-            self._render_finding(i, review) for i, review in enumerate(reviews)
+            self._render_finding(i, review) for i, review in indexed_reviews
         )
         user = f"{diff_and_context}\n\n## Findings to verify\n{findings}"
         return [
@@ -577,6 +694,171 @@ class ReviewPipeline:
             head_sha=event.head_sha,
             reason=reason,
         )
+
+    async def _resolve_max_context(self) -> int:
+        """서버가 실제로 쓸 수 있는 컨텍스트 크기를 확인한다(이슈 #98).
+
+        운영 llama-server가 병렬 슬롯 옵션 없이 떠 있어, 설정값(llm_max_context)이
+        실제 요청당 usable 컨텍스트보다 클 수 있다 — /props로 실측한 값이 있으면
+        그걸 우선한다(설정값과 min). 성공한 값만 캐시하고, 실패(서버가 아직
+        기동 중이거나 /props 미지원)하면 이번 호출은 설정값으로 폴백하되 다음
+        리뷰에서 다시 시도한다(실패를 영구 캐시하지 않는다).
+        """
+        if self._effective_max_context is not None:
+            return self._effective_max_context
+        try:
+            actual = await self._llm.get_context_window()
+        except Exception:
+            actual = None
+        if actual is not None:
+            self._effective_max_context = min(self._llm_max_context, actual)
+            return self._effective_max_context
+        return self._llm_max_context
+
+    async def _count_tokens(self, text: str) -> int:
+        """실제 토큰 수를 재고, 실패하면 보수적 추정으로 폴백한다."""
+        try:
+            return await self._llm.count_tokens(text)
+        except Exception:
+            logger.warning(
+                "token count via /tokenize failed, using conservative estimate",
+                exc_info=True,
+            )
+            return estimate_tokens(text)
+
+    async def _diff_floor_chars(
+        self,
+        targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
+    ) -> int:
+        """diff를 이 문자 수 밑으로는 줄이지 않는다.
+
+        원래 diff가 이미 _MIN_DIFF_TOKENS보다 작은 PR은 그 크기 자체가 바닥이라
+        — 그런 작은 PR이 축소 대상이 되거나 실패 조건이 되면 안 된다. 실측
+        토큰 수(count_tokens, 실패 시 폴백)로 판정한다 — _MIN_DIFF_TOKENS
+        자체가 "실제 토큰 수" 기준의 정책값이라, 다른 척도(폴백 추정)로 재면
+        기준이 어긋난다.
+        """
+        blocks = [
+            (t.file_path, self._render_target(t, related_context.get(t.file_path, [])))
+            for t in targets
+        ]
+        original_diff = _truncate_diff_blocks(blocks, max_total_chars=_MAX_DIFF_TOTAL_CHARS)
+        original_tokens = await self._count_tokens(original_diff)
+        if original_tokens <= _MIN_DIFF_TOKENS:
+            return len(original_diff)
+        return max(
+            0, math.floor(len(original_diff) * _MIN_DIFF_TOKENS / original_tokens)
+        )
+
+    async def _reduced_char_limit(self, current_text: str, overshoot_tokens: int) -> int:
+        """current_text에서 overshoot_tokens만큼 토큰을 줄이기 위한 목표 문자 수를
+        비례 계산한다.
+
+        overshoot_tokens와 반드시 같은 측정 기준(count_tokens, 실패 시 폴백)으로
+        현재 크기를 재야 한다 — 폴백 추정(한글 0.7자/토큰처럼 실제보다 훨씬
+        보수적인 비율)으로 재고 실측 기준 overshoot을 그대로 빼면, 두 척도가
+        섞여 한글이 많은 텍스트에서 축소량이 실제 필요량보다 훨씬 작게 계산돼
+        반복 한도 안에 수렴하지 못할 수 있다.
+        """
+        current_tokens = await self._count_tokens(current_text)
+        if current_tokens <= 0:
+            return 0
+        target_tokens = max(0, current_tokens - overshoot_tokens)
+        return max(0, math.floor(len(current_text) * target_tokens / current_tokens))
+
+    async def _assemble_within_budget(
+        self,
+        event: ReviewRequestedEvent,
+        targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
+        api_spec_context: str,
+        official_docs_context: str,
+    ) -> list[ChatMessage] | None:
+        """오늘의 _build_messages() 결과를 실측 토큰 수로 검증하고, 예산을 넘으면
+        보조 정보부터 순서대로 줄여 재조립한다(이슈 #98).
+
+        1차 조립은 기존 문자 기반 로직 그대로라, 예산 안에 원래 들어가던 PR은
+        축소 단계가 아예 작동하지 않고 프롬프트가 오늘과 100% 동일하게 나온다.
+
+        축소 순서: official_docs/api_spec(보조 정보) → 프로젝트 컨텍스트 →
+        PR 본문 → diff(리뷰 대상 자체, 최후·최소 보장). 전부 최소로 줄여도
+        넘치면 None을 반환해 호출자가 context_overflow로 실패 처리하게 한다.
+        """
+        effective_max_context = await self._resolve_max_context()
+        budget = effective_max_context - self._max_tokens - _SAFETY_MARGIN_TOKENS
+        diff_floor = await self._diff_floor_chars(targets, related_context)
+
+        overrides: dict[str, int] = {}
+        reduction_steps = ["official_docs", "api_spec", "context", "pr_body", "diff"]
+        step_index = 0
+
+        messages: list[ChatMessage] = []
+        for _attempt in range(1 + len(reduction_steps) * 3):
+            cur_api_spec = (
+                api_spec_context
+                if "api_spec" not in overrides
+                else _shrink_to_char_limit(api_spec_context, overrides["api_spec"])
+            )
+            cur_official_docs = (
+                official_docs_context
+                if "official_docs" not in overrides
+                else _shrink_to_char_limit(official_docs_context, overrides["official_docs"])
+            )
+            messages, sections = self._build_messages(
+                event,
+                targets,
+                related_context,
+                cur_api_spec,
+                cur_official_docs,
+                context_max_chars=overrides.get("context"),
+                pr_body_max_chars=overrides.get("pr_body"),
+                diff_max_chars=overrides.get("diff"),
+            )
+            text = messages[0]["content"] + messages[1]["content"]
+            actual = await self._count_tokens(text)
+            if actual <= budget:
+                return messages
+
+            if step_index >= len(reduction_steps):
+                return None
+
+            overshoot = actual - budget
+            step = reduction_steps[step_index]
+            if step == "api_spec":
+                new_limit = await self._reduced_char_limit(cur_api_spec, overshoot)
+                if new_limit >= len(cur_api_spec):
+                    step_index += 1
+                    continue
+                overrides["api_spec"] = new_limit
+            elif step == "official_docs":
+                new_limit = await self._reduced_char_limit(cur_official_docs, overshoot)
+                if new_limit >= len(cur_official_docs):
+                    step_index += 1
+                    continue
+                overrides["official_docs"] = new_limit
+            elif step == "context":
+                new_limit = await self._reduced_char_limit(sections["context"], overshoot)
+                if new_limit >= len(sections["context"]):
+                    step_index += 1
+                    continue
+                overrides["context"] = new_limit
+            elif step == "pr_body":
+                new_limit = await self._reduced_char_limit(sections["pr_section"], overshoot)
+                if new_limit >= len(sections["pr_section"]):
+                    step_index += 1
+                    continue
+                overrides["pr_body"] = new_limit
+            else:  # diff — diff_floor 밑으로는 안 줄인다
+                new_limit = max(
+                    diff_floor, await self._reduced_char_limit(sections["diff"], overshoot)
+                )
+                if new_limit >= len(sections["diff"]):
+                    step_index += 1
+                    continue
+                overrides["diff"] = new_limit
+
+        return None
 
     async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
         """swagger가 없고 DOVI.md에 Notion API 명세 링크가 있으면 저장해 둔다.
@@ -697,34 +979,66 @@ class ReviewPipeline:
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str = "",
         official_docs_context: str = "",
-    ) -> list[ChatMessage]:
+        *,
+        context_max_chars: int | None = None,
+        pr_body_max_chars: int | None = None,
+        diff_max_chars: int | None = None,
+    ) -> tuple[list[ChatMessage], dict[str, str]]:
+        """override 인자(*_max_chars)를 전부 안 주면(=None) 오늘의 문자 기반 조립
+        로직과 100% 동일하게 동작한다 — `_assemble_within_budget()`이 예산 초과가
+        실측으로 확인됐을 때만 override를 채워 재조립한다(이슈 #98).
+
+        조립된 messages와 함께, 축소 캐스케이드가 각 섹션의 현재 크기를 알 수
+        있도록 섹션별 원문(context/pr_section/diff/api_spec_context/
+        official_docs_context)도 함께 반환한다.
+        """
         blocks = [
             (t.file_path, self._render_target(t, related_context.get(t.file_path, [])))
             for t in targets
         ]
-        context = build_context(event.context_files)
+        context_kwargs = (
+            {} if context_max_chars is None else {"max_total_chars": context_max_chars}
+        )
+        context = build_context(event.context_files, **context_kwargs)
+
         pr_section = self._build_pr_description_section(event)
+        if pr_body_max_chars is not None:
+            pr_section = _shrink_to_char_limit(pr_section, pr_body_max_chars)
+
         # api_spec_context/official_docs_context/pr_section도 같은 user 메시지에
         # 함께 들어가므로 diff 예산에서 모두 뺀다 — 빼지 않으면 큰 diff + 여러
         # 의존성 범프 + 긴 PR 본문이 겹친 PR에서 프롬프트가 LLM_MAX_CONTEXT를
-        # 넘겨 조용히 실패한다(PR #66 사례).
-        diff_budget = max(
-            0,
-            _MAX_DIFF_TOTAL_CHARS
-            - len(context)
-            - len(api_spec_context)
-            - len(official_docs_context)
-            - len(pr_section),
-        )
+        # 넘겨 조용히 실패한다(PR #66 사례). diff_max_chars가 명시되면(축소
+        # 캐스케이드가 실측 기반으로 계산한 값) 이 문자 기반 계산 대신 그 값을
+        # 그대로 쓴다.
+        if diff_max_chars is not None:
+            diff_budget = diff_max_chars
+        else:
+            diff_budget = max(
+                0,
+                _MAX_DIFF_TOTAL_CHARS
+                - len(context)
+                - len(api_spec_context)
+                - len(official_docs_context)
+                - len(pr_section),
+            )
         diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         user = pr_section + user
         user += api_spec_context
         user += official_docs_context
-        return [
+        messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user},
         ]
+        sections = {
+            "context": context,
+            "pr_section": pr_section,
+            "diff": diff,
+            "api_spec_context": api_spec_context,
+            "official_docs_context": official_docs_context,
+        }
+        return messages, sections
 
     def _render_target(
         self, target: ReviewTarget, related: list[ChunkSearchResult]
