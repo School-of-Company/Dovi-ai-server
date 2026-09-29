@@ -48,6 +48,12 @@ class FakeLLM:
     ) -> VerificationResult:
         return VerificationResult(verdicts=[])
 
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
+
 
 class FailingLLM:
     async def generate(
@@ -60,6 +66,12 @@ class FailingLLM:
     ) -> VerificationResult:
         return VerificationResult(verdicts=[])
 
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
+
 
 class CancellingLLM:
     async def generate(
@@ -71,6 +83,12 @@ class CancellingLLM:
         self, messages: list[ChatMessage], *, max_tokens: int = 800
     ) -> VerificationResult:
         return VerificationResult(verdicts=[])
+
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
 
 
 class FakeProducer:
