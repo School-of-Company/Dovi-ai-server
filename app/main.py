@@ -197,7 +197,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         official_docs_workflow=official_docs_workflow,
     )
 
-    comment_answer_pipeline = CommentAnswerPipeline(llm_client)
+    comment_answer_pipeline = CommentAnswerPipeline(
+        llm_client, llm_max_context=settings.llm_max_context
+    )
 
     kafka_producer = create_producer(settings)
     kafka_consumer = create_consumer(settings)
