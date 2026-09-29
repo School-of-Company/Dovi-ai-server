@@ -1,10 +1,18 @@
+import copy
 import logging
 
 import httpx
 from langfuse import get_client, observe
 
+from app.llm.errors import LLMOutputTruncatedError
 from app.llm.output_parser import parse_review_output, parse_verification_result
 from app.review.schema import ReviewModelOutput, VerificationResult
+
+# 잘림 재시도(이슈 #99)에서 response_format 스키마에 걸어두는 message 길이
+# 상한. "2문장 이내"를 문자 수로 대략 환산한 값 — 문법 차원에서 강제되면
+# 출력 자체가 짧아져 잘림 재발을 줄이지만, 서버가 이 제약을 실제로 지원하는지
+# 확인되지 않았으므로 파이프라인은 이 값과 무관하게 개수를 별도로도 확인한다.
+_TRUNCATION_RETRY_MAX_MESSAGE_CHARS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -38,27 +46,47 @@ class OpenAICompatibleLLMClient:
         self._verification_schema = VerificationResult.model_json_schema(by_alias=True)
 
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
-        content = await self._complete(
+        schema = (
+            self._schema
+            if max_reviews is None
+            else self._truncation_retry_schema(max_reviews)
+        )
+        content, finish_reason = await self._complete(
             messages,
             max_tokens=max_tokens,
             response_format={
                 "type": "json_schema",
-                "json_schema": {"name": "review_output", "schema": self._schema},
+                "json_schema": {"name": "review_output", "schema": schema},
             },
         )
-        return parse_review_output(content)
+        try:
+            return parse_review_output(content)
+        except ValueError:
+            # finish_reason == "length"면 형식 오류가 아니라 출력이 잘린
+            # 것이다 — 호출자(ReviewPipeline)가 잘린 원문에서 부분 복구를
+            # 시도할 수 있도록 원문을 실어 별도 예외로 던진다(이슈 #99).
+            if finish_reason == "length":
+                raise LLMOutputTruncatedError(
+                    "LLM output truncated at max_tokens", raw_content=content
+                ) from None
+            raise
 
     async def generate_text(
         self, messages: list[ChatMessage], *, max_tokens: int = 500
     ) -> str:
-        return await self._complete(messages, max_tokens=max_tokens)
+        content, _finish_reason = await self._complete(messages, max_tokens=max_tokens)
+        return content
 
     async def verify_findings(
         self, messages: list[ChatMessage], *, max_tokens: int = 800
     ) -> VerificationResult:
-        content = await self._complete(
+        content, _finish_reason = await self._complete(
             messages,
             max_tokens=max_tokens,
             response_format={
@@ -70,6 +98,18 @@ class OpenAICompatibleLLMClient:
             },
         )
         return parse_verification_result(content)
+
+    def _truncation_retry_schema(self, max_reviews: int) -> dict[str, object]:
+        """잘림 재시도 전용 스키마 사본 — reviews 개수와 message 길이에 문법
+        차원의 상한을 건다(이슈 #99). 원본 self._schema는 다른 호출에서 계속
+        재사용되므로 깊은 복사본만 수정한다.
+        """
+        schema = copy.deepcopy(self._schema)
+        schema["properties"]["reviews"]["maxItems"] = max_reviews
+        schema["$defs"]["ReviewComment"]["properties"]["message"]["maxLength"] = (
+            _TRUNCATION_RETRY_MAX_MESSAGE_CHARS
+        )
+        return schema
 
     async def count_tokens(self, text: str) -> int:
         """llama.cpp의 /tokenize로 실제 토큰 수를 센다. 실패하면 예외를 그대로
@@ -112,7 +152,7 @@ class OpenAICompatibleLLMClient:
         *,
         max_tokens: int,
         response_format: dict[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         # generate()/generate_text()/verify_findings() 전부 이 헬퍼 하나를 거치므로,
         # 계측 지점을 여기 한 곳에만 두면 셋 다 자동으로 트레이싱된다. Langfuse가
         # 설정 안 돼 있으면(LANGFUSE_ENABLED=false) get_client()는 그냥 no-op이라
@@ -157,10 +197,10 @@ class OpenAICompatibleLLMClient:
 
         # finish_reason == "length"는 출력이 max_tokens에 걸려 잘렸다는 뜻이라,
         # 이후 parse_error가 나면 "모델이 형식을 못 지켰다"가 아니라 "출력이
-        # 잘렸다"는 걸 구분하는 근거가 된다(이슈 #98/#99) — 여기선 관측(로그+
-        # Langfuse metadata)만 하고, 그 정보로 재시도 전략을 바꾸는 건 #99 범위.
-        # choices[0]은 위에서 이미 성공적으로 접근했으므로(content 추출) 여기서
-        # 다시 존재를 확인할 필요는 없다.
+        # 잘렸다"는 걸 구분하는 근거가 된다 — generate()가 이 값을 보고
+        # LLMOutputTruncatedError로 바꿔 던진다(이슈 #99). choices[0]은 위에서
+        # 이미 성공적으로 접근했으므로(content 추출) 여기서 다시 존재를 확인할
+        # 필요는 없다.
         finish_reason = data["choices"][0].get("finish_reason")
         if finish_reason == "length":
             logger.warning("LLM output truncated by max_tokens model=%s", self._model)
@@ -177,7 +217,7 @@ class OpenAICompatibleLLMClient:
             metadata={"finish_reason": finish_reason},
         )
 
-        return content
+        return content, finish_reason
 
     async def aclose(self) -> None:
         await self._client.aclose()

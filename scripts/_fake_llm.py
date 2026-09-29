@@ -6,7 +6,11 @@ from app.review.schema import ReviewComment, ReviewModelOutput, ReviewVerdict, V
 
 class FakeLLM:
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
         return ReviewModelOutput(
             summary="[FAKE] 잔액 검증 완화 및 과인출 가능성이 있습니다.",

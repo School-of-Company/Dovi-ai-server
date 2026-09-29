@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
+from app.llm.errors import LLMOutputTruncatedError
 from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.diff import analyze
@@ -96,6 +97,10 @@ class FakeLLM:
         self.received: list[ChatMessage] | None = None
         self.verify_received: list[ChatMessage] | None = None
         self.call_count = 0
+        # 호출별 (messages, max_tokens, max_reviews) 전부를 기록한다 — 잘림
+        # 재시도(이슈 #99)가 어떤 조건으로 나갔는지 확인하려면 마지막 호출
+        # 하나(received)만으로는 부족하다.
+        self.generate_calls: list[tuple[list[ChatMessage], int, int | None]] = []
 
     async def count_tokens(self, text: str) -> int:
         if self._token_counter is not None:
@@ -106,10 +111,15 @@ class FakeLLM:
         return self._context_window
 
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
         self.received = messages
         self.call_count += 1
+        self.generate_calls.append((messages, max_tokens, max_reviews))
 
         if self._sequence is not None:
             result = self._sequence[self.call_count - 1]
@@ -1455,3 +1465,171 @@ async def test_resolve_max_context_only_caches_successful_result() -> None:
     assert second == 4096  # 재시도 성공 → /props 값 사용
     assert third == 4096  # 성공한 값은 캐시되어 재호출 안 됨
     assert fake.context_window_calls == 2
+
+
+# --- 출력 잘림 부분 복구/재시도 (이슈 #99) ---
+
+_TRUNCATED_ONE_COMPLETE_FINDING = (
+    '{"summary": "확인 결과 문제를 찾았습니다.", "reviews": ['
+    '{"severity": "critical", "confidence": 0.9, "filePath": "app/main.py", "line": 3, '
+    '"title": "t1", "message": "m1", "evidence": ["e1"]}, '
+    '{"severity": "major", "confidence": 0.8, "filePath": "app/other.py", "line": 9, '
+    '"title": "t2", "message": "잘'
+)
+
+_TRUNCATED_NOTHING_RECOVERABLE = (
+    '{"summary": "s", "reviews": [{"severity": "major", "confidence": 0.9, "filePath": "a.py"'
+)
+
+
+async def test_run_recovers_truncated_output_without_retry() -> None:
+    fake = FakeLLM(
+        error=LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_ONE_COMPLETE_FINDING)
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.call_count == 1  # 추가 LLM 호출 없이 복구됨
+    assert "잘려" in result.summary
+    assert any(r.file_path == "app/main.py" for r in result.reviews)
+
+
+async def test_run_verifies_recovered_findings() -> None:
+    fake = FakeLLM(
+        error=LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_ONE_COMPLETE_FINDING)
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert len(fake.verify_calls) == 1  # 복구된 finding도 평소처럼 2차 검증을 거친다
+
+
+async def test_run_logs_recovery_stats_when_truncated_output_is_recovered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeLLM(
+        error=LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_ONE_COMPLETE_FINDING)
+    )
+
+    with caplog.at_level("INFO"):
+        await _pipeline(fake).run(_event())
+
+    assert any(
+        "recovered without retry" in record.message and "recoveredFindings=1" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_run_retries_shortened_after_truncation_with_no_recoverable_findings() -> None:
+    fake = FakeLLM(
+        sequence=[
+            LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_NOTHING_RECOVERABLE),
+            ReviewModelOutput(summary="ok", reviews=[]),
+        ]
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.call_count == 2
+    assert len(fake.generate_calls) == 2
+    first_messages, first_max_tokens, first_max_reviews = fake.generate_calls[0]
+    retry_messages, retry_max_tokens, retry_max_reviews = fake.generate_calls[1]
+    assert retry_max_tokens == first_max_tokens  # max_tokens는 그대로
+    assert retry_max_reviews == 5  # 기본 truncation_retry_max_findings
+    assert "최대 5개" in retry_messages[1]["content"]
+    assert retry_messages[1]["content"] != first_messages[1]["content"]
+
+
+async def test_run_fails_with_output_truncated_when_shortened_retry_also_unrecoverable() -> None:
+    fake = FakeLLM(
+        sequence=[
+            LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_NOTHING_RECOVERABLE),
+            LLMOutputTruncatedError("truncated again", raw_content=_TRUNCATED_NOTHING_RECOVERABLE),
+        ]
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewFailedEvent)
+    assert result.reason == "output_truncated"
+    assert fake.call_count == 2  # 무의미한 3번째 호출은 없다
+
+
+async def test_run_recovers_from_retry_output_that_also_truncates() -> None:
+    """재시도 출력도 잘리면, 추가 LLM 호출 없이 그 원문에서도 부분 복구를
+    한 번 더 시도해야 한다."""
+    retry_truncated_but_recoverable = (
+        '{"summary": "재시도 결과", "reviews": ['
+        '{"severity": "critical", "confidence": 0.9, "filePath": "a.py", "line": 1, '
+        '"title": "t", "message": "m", "evidence": ["e"]}, '
+        '{"severity": "major", "confidence": 0.7, "filePath": "b.py", "line": 2, '
+        '"title": "t2", "message": "잘'
+    )
+    fake = FakeLLM(
+        sequence=[
+            LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_NOTHING_RECOVERABLE),
+            LLMOutputTruncatedError(
+                "truncated", raw_content=retry_truncated_but_recoverable
+            ),
+        ]
+    )
+
+    result = await _pipeline(fake).run(_event())
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.call_count == 2
+
+
+async def test_run_skips_shortened_retry_when_suffix_does_not_fit_budget() -> None:
+    """1차 조립은 예산에 딱 들어가지만, 재시도 접미사를 더하면 넘치는 경우 —
+    재시도 호출 자체를 하지 않고 output_truncated로 실패해야 한다."""
+    event = _event()
+    targets = analyze(event)
+    probe_pipeline = _pipeline(FakeLLM())
+    baseline_messages, _ = probe_pipeline._build_messages(event, targets, {})
+    baseline_tokens = _realistic_token_counter(
+        baseline_messages[0]["content"] + baseline_messages[1]["content"]
+    )
+
+    max_tokens = 50
+    # 원본 조립은 딱 1토큰 여유로 들어가지만, 접미사(수십 토큰)를 더하면
+    # 반드시 넘치도록 예산을 빠듯하게 잡는다. diff가 이미 _MIN_DIFF_TOKENS
+    # 밑이라 더 줄일 수도 없어, 재시도용 조립은 반드시 None이 된다.
+    llm_max_context = baseline_tokens + max_tokens + _SAFETY_MARGIN_TOKENS + 1
+    fake = FakeLLM(
+        error=LLMOutputTruncatedError("truncated", raw_content=_TRUNCATED_NOTHING_RECOVERABLE),
+        token_counter=_realistic_token_counter,
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewFailedEvent)
+    assert result.reason == "output_truncated"
+    assert fake.call_count == 1  # 재시도 호출 자체가 없었다
+
+
+async def test_retry_shortened_caps_review_count_in_python() -> None:
+    """response_format의 maxItems를 서버가 실제로 지키는지 확인되지 않았으므로,
+    응답이 그 이상이면 파이썬에서도 강제로 잘라야 한다."""
+    many_reviews = [_comment(file_path=f"f{i}.py", line=i + 1) for i in range(8)]
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=many_reviews))
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", truncation_retry_max_findings=5
+    )
+    event = _event()
+    targets = analyze(event)
+
+    output = await pipeline._retry_shortened(event, targets, {}, "", "")
+
+    assert output is not None
+    assert len(output.reviews) == 5
