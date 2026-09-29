@@ -84,6 +84,12 @@ _MIN_DIFF_TOKENS = 500
 # 검증 없이 폐기한다(기존 "검증 불확실하면 보수적으로 버린다" 철학과 일관).
 _MAX_VERIFY_BATCHES = 5
 
+# 리뷰 대상 파일들을 예산에 맞는 배치로 나눠 각각 LLM을 호출할 때(이슈 #108,
+# map-reduce), 배치 수가 이 이상이면 더 쪼개지 않고 남은 파일은 시도조차
+# 하지 않은 채 생략 목록으로 처리한다 — _MAX_VERIFY_BATCHES와 같은 값·같은
+# 철학(그 이상은 호출당 최대 120초가 배치 수만큼 곱해져 시간 비용이 더 크다).
+_MAX_REVIEW_BATCHES = 5
+
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
 # 들어갔다는 의심 신호로 본다 (관측용 — 하드 차단은 아니다).
@@ -442,101 +448,125 @@ class ReviewPipeline:
         related_context = await self._retrieve_related_context(event.repository_id, targets)
         api_spec_context = await self._retrieve_api_spec_context(event, targets)
         official_docs_context = await self._build_official_docs_context(event)
-        messages = await self._assemble_within_budget(
+
+        target_batches, omitted_files = await self._split_targets_into_batches(
             event, targets, related_context, api_spec_context, official_docs_context
         )
-        if messages is None:
+        if not target_batches:
+            # 모든 파일이 배치 상한/예산 초과로 애초에 시도조차 못 하는 극단적
+            # 경우 — 조용히 빈 리뷰를 완료 처리하지 않고 오늘처럼 명시 실패한다.
             logger.warning(
-                "prompt exceeds context budget even after reducing all sections "
-                "reviewJobId=%s",
-                event.review_job_id,
+                "no batches could be attempted reviewJobId=%s", event.review_job_id
             )
             return self._failed(event, "context_overflow")
 
-        # parse_error/server_error는 1회 재시도 후 실패 처리. timeout은 즉시 실패
-        # (재시도가 SLA를 더 악화시키므로 재시도하지 않는다).
-        # propagate_attributes로 감싸, 같은 reviewJobId의 1차 생성+2차 검증 LLM
-        # 호출이 Langfuse에서 하나의 세션으로 묶이게 한다(Langfuse 미설정 시 no-op).
-        last_reason: FailureReason = "server_error"
+        # 배치별 결과: (LLM 출력, 실제로 쓰인 messages, 그 배치가 다룬 파일들).
+        successful: list[tuple[ReviewModelOutput, list[ChatMessage], list[str]]] = []
+        # parse_error/server_error는 배치마다 1회 재시도 후 실패 처리. timeout은
+        # 즉시 실패(재시도가 SLA를 더 악화시키므로 재시도하지 않는다) — 오늘과
+        # 동일한 규칙을 _generate_batch()가 배치 하나마다 적용한다.
+        # propagate_attributes로 배치 루프 전체를 감싸, 같은 reviewJobId의
+        # 배치 N개 생성 + 검증 LLM 호출이 Langfuse에서 하나의 세션으로 묶이게
+        # 한다(Langfuse 미설정 시 no-op).
+        #
+        # 초기값이 "context_overflow"인 이유: 모든 배치가 조립 단계(예산
+        # 초과)에서 걸러지면 _generate_batch()가 한 번도 안 불려 last_reason이
+        # 갱신될 기회가 없다 — 그 경우 실제 원인은 예산 초과이지, 서버 오류가
+        # 아니다. _generate_batch()가 최소 한 번이라도 불리면 그 결과로
+        # 덮어써진다(아래 루프).
+        last_reason: FailureReason = "context_overflow"
         with propagate_attributes(
             session_id=event.review_job_id,
             metadata={"repository_id": event.repository_id, "pr_number": event.pr_number},
         ):
-            for _ in range(2):
-                try:
-                    output = await self._llm.generate(messages, max_tokens=self._max_tokens)
-                except TimeoutError:
+            for batch_targets in target_batches:
+                batch_messages = await self._assemble_within_budget(
+                    event,
+                    batch_targets,
+                    related_context,
+                    api_spec_context,
+                    official_docs_context,
+                )
+                if batch_messages is None:
                     logger.warning(
-                        "LLM timeout reviewJobId=%s", event.review_job_id
-                    )
-                    return self._failed(event, "timeout")
-                except LLMOutputTruncatedError as exc:
-                    # 잘린 출력도 앞부분은 멀쩡한 finding들이다 — 추가 LLM
-                    # 호출 없이 그것부터 살린다(이슈 #99). 하나도 못 살리면
-                    # 그때만 짧게 쓰라는 지시를 붙여 1회 더 시도한다.
-                    recovered = parse_partial_review_output(exc.raw_content)
-                    if recovered is not None:
-                        logger.info(
-                            "output truncated, recovered without retry "
-                            "reviewJobId=%s recoveredFindings=%d "
-                            "duplicatesRemoved=%d",
-                            event.review_job_id,
-                            len(recovered.output.reviews),
-                            recovered.duplicates_removed,
-                        )
-                        output = recovered.output
-                    else:
-                        logger.warning(
-                            "output truncated with nothing recoverable, "
-                            "retrying shortened reviewJobId=%s",
-                            event.review_job_id,
-                        )
-                        retried = await self._retry_shortened(
-                            event,
-                            targets,
-                            related_context,
-                            api_spec_context,
-                            official_docs_context,
-                        )
-                        if retried is None:
-                            logger.warning(
-                                "review failed reviewJobId=%s reason=output_truncated",
-                                event.review_job_id,
-                            )
-                            return self._failed(event, "output_truncated")
-                        output = retried
-                except (ValueError, ValidationError):
-                    logger.warning(
-                        "LLM output parse_error reviewJobId=%s", event.review_job_id
-                    )
-                    last_reason = "parse_error"
-                    continue
-                except Exception:
-                    logger.exception(
-                        "unexpected error during LLM generation reviewJobId=%s",
+                        "batch prompt exceeds context budget even after reducing "
+                        "all sections reviewJobId=%s",
                         event.review_job_id,
                     )
-                    last_reason = "server_error"
+                    omitted_files.extend(t.file_path for t in batch_targets)
                     continue
 
-                llm_reviews = list(output.reviews)
-                output.reviews.extend(dependency_findings)
-
-                reviews = filter_reviews(output.reviews)
-                if reviews:
-                    reviews = await self._verify(event, messages, reviews)
-                summary = self._build_summary(output.summary, output.reviews, llm_reviews)
-                logger.info(
-                    "review completed reviewJobId=%s reviewCount=%d",
-                    event.review_job_id,
-                    len(reviews),
+                result = await self._generate_batch(
+                    event,
+                    batch_targets,
+                    related_context,
+                    api_spec_context,
+                    official_docs_context,
+                    batch_messages,
                 )
-                return self._completed(event, summary, reviews)
+                if isinstance(result, str):
+                    last_reason = result
+                    omitted_files.extend(t.file_path for t in batch_targets)
+                    continue
 
-        logger.warning(
-            "review failed reviewJobId=%s reason=%s", event.review_job_id, last_reason
+                output, used_messages = result
+                successful.append(
+                    (output, used_messages, [t.file_path for t in batch_targets])
+                )
+
+        if not successful:
+            logger.warning(
+                "review failed reviewJobId=%s reason=%s", event.review_job_id, last_reason
+            )
+            return self._failed(event, last_reason)
+
+        # --- reduce ---
+        all_llm_reviews: list[ReviewComment] = []
+        review_to_messages: dict[int, list[ChatMessage]] = {}
+        summary_parts: list[str] = []
+        for output, used_messages, file_list in successful:
+            batch_llm_reviews = list(output.reviews)
+            if len(batch_llm_reviews) == 0 and len(output.summary) > _SUSPICIOUS_SUMMARY_LENGTH:
+                logger.warning(
+                    "summary unusually long (%d chars) with no reviews[] entries "
+                    "in batch files=%s — possible finding leaked into summary "
+                    "prose instead of reviews[]",
+                    len(output.summary),
+                    file_list,
+                )
+            for r in batch_llm_reviews:
+                review_to_messages[id(r)] = used_messages
+            all_llm_reviews.extend(batch_llm_reviews)
+            if len(successful) == 1:
+                summary_parts.append(output.summary)
+            else:
+                summary_parts.append(f"- ({', '.join(file_list)}) {output.summary}")
+
+        combined_summary = (
+            summary_parts[0]
+            if len(successful) == 1
+            else "여러 배치로 나눠 리뷰했습니다:\n" + "\n".join(summary_parts)
         )
-        return self._failed(event, last_reason)
+        if omitted_files:
+            combined_summary += (
+                f"\n\n(배치 상한 또는 예산 초과로 리뷰하지 못한 파일 "
+                f"{len(omitted_files)}개: {', '.join(omitted_files)})"
+            )
+
+        all_reviews = list(all_llm_reviews)
+        all_reviews.extend(dependency_findings)
+
+        reviews = filter_reviews(all_reviews)
+        if reviews:
+            reviews = await self._verify_across_batches(event, reviews, review_to_messages)
+        summary = self._build_summary(combined_summary, all_reviews, all_llm_reviews)
+        logger.info(
+            "review completed reviewJobId=%s reviewCount=%d batches=%d",
+            event.review_job_id,
+            len(reviews),
+            len(successful),
+        )
+        return self._completed(event, summary, reviews)
 
     def _completed(
         self,
@@ -589,6 +619,45 @@ class ReviewPipeline:
             return summary
         bullet_list = "\n".join(f"- {title}" for title in notes)
         return f"{summary}\n\n참고(경미한 항목):\n{bullet_list}"
+
+    async def _verify_across_batches(
+        self,
+        event: ReviewRequestedEvent,
+        filtered: list[ReviewComment],
+        review_to_messages: dict[int, list[ChatMessage]],
+    ) -> list[ReviewComment]:
+        """map-reduce(이슈 #108)로 여러 배치에서 나온 finding들을, 각자를 만든
+        배치의 messages(그 파일들의 diff/컨텍스트)로 나눠 검증한다.
+
+        다른 배치의 diff로 검증하면 그 finding이 속한 파일의 diff가 아예 안
+        보여 검증 자체가 무의미해진다. review_to_messages는 파이썬 객체
+        identity(id())로 각 finding이 어느 배치에서 나왔는지 추적한다 —
+        filter_reviews()는 리스트 컴프리헨션으로 같은 객체 참조만 골라내므로
+        (복사하지 않음) id() 매칭이 그대로 유효하다. dependency_findings는
+        severity="minor"라 filter_reviews()가 이미 걸러내(_INLINE_SEVERITIES=
+        {"critical","major"}) 여기 들어올 일이 없다.
+
+        배치가 1개면(오늘의 보통 PR) 그룹도 1개라 _verify()를 오늘과 완전히
+        동일하게 한 번만 호출한다.
+        """
+        groups: dict[int, tuple[list[ChatMessage], list[ReviewComment]]] = {}
+        order: list[int] = []
+        for review in filtered:
+            messages = review_to_messages[id(review)]
+            key = id(messages)
+            if key not in groups:
+                groups[key] = (messages, [])
+                order.append(key)
+            groups[key][1].append(review)
+
+        confirmed_ids: set[int] = set()
+        for key in order:
+            group_messages, group_reviews = groups[key]
+            for r in await self._verify(event, group_messages, group_reviews):
+                confirmed_ids.add(id(r))
+
+        # filtered의 원래 순서(심각도/신뢰도 순으로 이미 정렬됨)를 유지한다.
+        return [r for r in filtered if id(r) in confirmed_ids]
 
     async def _verify(
         self,
@@ -914,7 +983,7 @@ class ReviewPipeline:
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str,
         official_docs_context: str,
-    ) -> ReviewModelOutput | None:
+    ) -> tuple[ReviewModelOutput, list[ChatMessage]] | None:
         """잘림 후 부분 복구도 실패했을 때, finding 개수·길이를 줄여 딱 1회 더
         요청한다(이슈 #99).
 
@@ -923,6 +992,10 @@ class ReviewPipeline:
         `_assemble_within_budget()`의 실측 안에 포함시켜, 접미사만큼 늘어난
         프롬프트도 다시 예산을 통과하는지 확인한다 — 접미사 포함 상태로도
         예산을 못 맞추면 호출 자체를 하지 않고 None을 반환한다.
+
+        성공하면 실제로 재조립해 보낸 messages도 함께 반환한다(이슈 #108) —
+        접미사가 붙어 원래 messages와 다르므로, 호출자(verify 등)가 이 배치의
+        finding을 검증할 때 실제로 LLM이 본 프롬프트를 참조해야 한다.
         """
         suffix = (
             "\n\n(참고: 방금 출력이 중간에 잘렸습니다. 이번엔 finding을 최대 "
@@ -981,7 +1054,138 @@ class ReviewPipeline:
             # response_format의 maxItems(문법 차원 제한)를 서버가 실제로
             # 지키는지 확인되지 않았으므로, 파이썬에서도 강제한다.
             output.reviews = output.reviews[: self._truncation_retry_max_findings]
-        return output
+        return output, messages
+
+    async def _generate_batch(
+        self,
+        event: ReviewRequestedEvent,
+        batch_targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
+        api_spec_context: str,
+        official_docs_context: str,
+        messages: list[ChatMessage],
+    ) -> tuple[ReviewModelOutput, list[ChatMessage]] | FailureReason:
+        """배치 하나를 생성한다(이슈 #108) — run()의 예전 단일 호출 재시도
+        로직(parse_error/server_error 1회 재시도, timeout 즉시 실패, 출력
+        잘림 복구→재시도)을 그대로 옮긴 것이라, 배치가 1개인 오늘의 보통 PR은
+        이 메서드가 오늘과 동일한 호출 시퀀스를 만든다.
+
+        성공하면 (출력, 실제로 LLM에 보낸 messages)를 반환한다 — 잘림 재시도는
+        접미사가 붙은 다른 messages로 재조립하므로, 나중에 _verify_across_
+        batches()가 이 배치의 finding을 검증할 때 실제로 쓰인 프롬프트를
+        참조해야 한다. 모든 시도가 실패하면 최종 FailureReason 문자열을
+        반환한다.
+        """
+        last_reason: FailureReason = "server_error"
+        for _ in range(2):
+            try:
+                output = await self._llm.generate(messages, max_tokens=self._max_tokens)
+            except TimeoutError:
+                logger.warning("LLM timeout reviewJobId=%s", event.review_job_id)
+                return "timeout"
+            except LLMOutputTruncatedError as exc:
+                recovered = parse_partial_review_output(exc.raw_content)
+                if recovered is not None:
+                    logger.info(
+                        "output truncated, recovered without retry "
+                        "reviewJobId=%s recoveredFindings=%d "
+                        "duplicatesRemoved=%d",
+                        event.review_job_id,
+                        len(recovered.output.reviews),
+                        recovered.duplicates_removed,
+                    )
+                    return recovered.output, messages
+                logger.warning(
+                    "output truncated with nothing recoverable, "
+                    "retrying shortened reviewJobId=%s",
+                    event.review_job_id,
+                )
+                retried = await self._retry_shortened(
+                    event,
+                    batch_targets,
+                    related_context,
+                    api_spec_context,
+                    official_docs_context,
+                )
+                if retried is None:
+                    return "output_truncated"
+                return retried
+            except (ValueError, ValidationError):
+                logger.warning(
+                    "LLM output parse_error reviewJobId=%s", event.review_job_id
+                )
+                last_reason = "parse_error"
+                continue
+            except Exception:
+                logger.exception(
+                    "unexpected error during LLM generation reviewJobId=%s",
+                    event.review_job_id,
+                )
+                last_reason = "server_error"
+                continue
+            return output, messages
+        return last_reason
+
+    async def _split_targets_into_batches(
+        self,
+        event: ReviewRequestedEvent,
+        targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
+        api_spec_context: str,
+        official_docs_context: str,
+    ) -> tuple[list[list[ReviewTarget]], list[str]]:
+        """targets를 예산에 맞는 배치로 나눈다(이슈 #108).
+
+        (배치 목록, 배치 상한 초과로 애초에 시도조차 안 하는 파일 목록)을
+        반환한다. 실제 예산 확정은 각 배치가 조립될 때 _assemble_within_
+        budget()이 실측 토큰으로 다시 검증하므로, 여기서는 배치 "경계"만
+        정하면 된다 — _split_findings_into_batches()(verify용)와 같은
+        이유로 실측(/tokenize) 대신 폴백 estimate_tokens()만 쓴다(과다추정
+        이라 배치가 실제보다 잘게 나뉠 뿐, 예산을 넘기는 방향으로는 틀리지
+        않는다 — 매 파일마다 /tokenize를 부르지 않아도 된다).
+
+        한 파일이 그 자체로도 예산을 넘으면(초대형 파일) 쫓아내지 않고 자기
+        배치에 혼자 들어간다 — 그 배치는 _assemble_within_budget()의 기존
+        축소 캐스케이드를 그대로 타고, 그래도 안 되면 호출자가 생략 목록으로
+        처리한다. targets 전체가 예산 안에 들어가는 보통 PR은 이 루프가
+        한 번도 배치를 나누지 않아 배치 1개로 끝난다.
+        """
+        effective_max_context = await self._resolve_max_context()
+        budget = effective_max_context - self._max_tokens - _SAFETY_MARGIN_TOKENS
+
+        common_messages, _ = self._build_messages(
+            event, [], related_context, api_spec_context, official_docs_context
+        )
+        common_tokens = estimate_tokens(
+            common_messages[0]["content"] + common_messages[1]["content"]
+        )
+
+        batches: list[list[ReviewTarget]] = []
+        current: list[ReviewTarget] = []
+        current_tokens = common_tokens
+        for target in targets:
+            rendered = self._render_target(target, related_context.get(target.file_path, []))
+            target_tokens = estimate_tokens(rendered)
+            if current and current_tokens + target_tokens > budget:
+                batches.append(current)
+                current = []
+                current_tokens = common_tokens
+            current.append(target)
+            current_tokens += target_tokens
+        if current:
+            batches.append(current)
+
+        omitted_files: list[str] = []
+        if len(batches) > _MAX_REVIEW_BATCHES:
+            dropped = batches[_MAX_REVIEW_BATCHES:]
+            omitted_files = [t.file_path for batch in dropped for t in batch]
+            logger.warning(
+                "review batch cap exceeded reviewJobId=%s droppedFiles=%d",
+                event.review_job_id,
+                len(omitted_files),
+            )
+            batches = batches[:_MAX_REVIEW_BATCHES]
+        return batches, omitted_files
 
     async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
         """swagger가 없고 DOVI.md에 Notion API 명세 링크가 있으면 저장해 둔다.
