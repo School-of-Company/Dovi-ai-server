@@ -189,6 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         llm_max_context=settings.llm_max_context,
         max_tokens=settings.llm_max_tokens,
         verify_max_tokens=settings.llm_verify_max_tokens,
+        truncation_retry_max_findings=settings.llm_truncation_retry_max_findings,
         retriever=retriever,
         api_spec_retriever=api_spec_retriever,
         notion_link_store=notion_link_store,

@@ -39,7 +39,11 @@ class FakeLLM:
         self._output = output
 
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
         return self._output
 
@@ -57,7 +61,11 @@ class FakeLLM:
 
 class FailingLLM:
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
         raise RuntimeError("boom")
 
@@ -75,7 +83,11 @@ class FailingLLM:
 
 class CancellingLLM:
     async def generate(
-        self, messages: list[ChatMessage], *, max_tokens: int = 1500
+        self,
+        messages: list[ChatMessage],
+        *,
+        max_tokens: int = 1500,
+        max_reviews: int | None = None,
     ) -> ReviewModelOutput:
         raise asyncio.CancelledError()
 

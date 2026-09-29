@@ -10,6 +10,8 @@ from pydantic import ValidationError
 
 from app.context.api_spec_link_store import NotionLinkStore
 from app.llm.client import ChatMessage, LLMClient
+from app.llm.errors import LLMOutputTruncatedError
+from app.llm.output_parser import parse_partial_review_output
 from app.llm.tokens import estimate_tokens
 from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
@@ -22,6 +24,7 @@ from app.review.schema import (
     ReviewComment,
     ReviewCompletedEvent,
     ReviewFailedEvent,
+    ReviewModelOutput,
     ReviewRequestedEvent,
     ReviewTarget,
     VerificationResult,
@@ -391,6 +394,7 @@ class ReviewPipeline:
         llm_max_context: int = 8192,
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
+        truncation_retry_max_findings: int = 5,
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
@@ -403,6 +407,7 @@ class ReviewPipeline:
         self._llm_max_context = llm_max_context
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
+        self._truncation_retry_max_findings = truncation_retry_max_findings
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
@@ -465,6 +470,41 @@ class ReviewPipeline:
                         "LLM timeout reviewJobId=%s", event.review_job_id
                     )
                     return self._failed(event, "timeout")
+                except LLMOutputTruncatedError as exc:
+                    # 잘린 출력도 앞부분은 멀쩡한 finding들이다 — 추가 LLM
+                    # 호출 없이 그것부터 살린다(이슈 #99). 하나도 못 살리면
+                    # 그때만 짧게 쓰라는 지시를 붙여 1회 더 시도한다.
+                    recovered = parse_partial_review_output(exc.raw_content)
+                    if recovered is not None:
+                        logger.info(
+                            "output truncated, recovered without retry "
+                            "reviewJobId=%s recoveredFindings=%d "
+                            "duplicatesRemoved=%d",
+                            event.review_job_id,
+                            len(recovered.output.reviews),
+                            recovered.duplicates_removed,
+                        )
+                        output = recovered.output
+                    else:
+                        logger.warning(
+                            "output truncated with nothing recoverable, "
+                            "retrying shortened reviewJobId=%s",
+                            event.review_job_id,
+                        )
+                        retried = await self._retry_shortened(
+                            event,
+                            targets,
+                            related_context,
+                            api_spec_context,
+                            official_docs_context,
+                        )
+                        if retried is None:
+                            logger.warning(
+                                "review failed reviewJobId=%s reason=output_truncated",
+                                event.review_job_id,
+                            )
+                            return self._failed(event, "output_truncated")
+                        output = retried
                 except (ValueError, ValidationError):
                     logger.warning(
                         "LLM output parse_error reviewJobId=%s", event.review_job_id
@@ -774,6 +814,8 @@ class ReviewPipeline:
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str,
         official_docs_context: str,
+        *,
+        extra_user_suffix: str = "",
     ) -> list[ChatMessage] | None:
         """오늘의 _build_messages() 결과를 실측 토큰 수로 검증하고, 예산을 넘으면
         보조 정보부터 순서대로 줄여 재조립한다(이슈 #98).
@@ -784,6 +826,10 @@ class ReviewPipeline:
         축소 순서: official_docs/api_spec(보조 정보) → 프로젝트 컨텍스트 →
         PR 본문 → diff(리뷰 대상 자체, 최후·최소 보장). 전부 최소로 줄여도
         넘치면 None을 반환해 호출자가 context_overflow로 실패 처리하게 한다.
+
+        extra_user_suffix(이슈 #99, 잘림 재시도 전용)를 주면 그 길이도 실측에
+        포함시켜, 지시문을 붙인 채로도 예산을 통과하는지 다시 확인한다 —
+        기본값 ""이면 오늘과 완전히 동일하게 동작한다.
         """
         effective_max_context = await self._resolve_max_context()
         budget = effective_max_context - self._max_tokens - _SAFETY_MARGIN_TOKENS
@@ -814,6 +860,7 @@ class ReviewPipeline:
                 context_max_chars=overrides.get("context"),
                 pr_body_max_chars=overrides.get("pr_body"),
                 diff_max_chars=overrides.get("diff"),
+                extra_user_suffix=extra_user_suffix,
             )
             text = messages[0]["content"] + messages[1]["content"]
             actual = await self._count_tokens(text)
@@ -859,6 +906,82 @@ class ReviewPipeline:
                 overrides["diff"] = new_limit
 
         return None
+
+    async def _retry_shortened(
+        self,
+        event: ReviewRequestedEvent,
+        targets: list[ReviewTarget],
+        related_context: dict[str, list[ChunkSearchResult]],
+        api_spec_context: str,
+        official_docs_context: str,
+    ) -> ReviewModelOutput | None:
+        """잘림 후 부분 복구도 실패했을 때, finding 개수·길이를 줄여 딱 1회 더
+        요청한다(이슈 #99).
+
+        `max_tokens`는 그대로 둔다 — 지연 시간 분포가 오늘의 parse_error
+        재시도와 같아 타임아웃(120s) 위험이 늘지 않는다. 대신 지시문 접미사를
+        `_assemble_within_budget()`의 실측 안에 포함시켜, 접미사만큼 늘어난
+        프롬프트도 다시 예산을 통과하는지 확인한다 — 접미사 포함 상태로도
+        예산을 못 맞추면 호출 자체를 하지 않고 None을 반환한다.
+        """
+        suffix = (
+            "\n\n(참고: 방금 출력이 중간에 잘렸습니다. 이번엔 finding을 최대 "
+            f"{self._truncation_retry_max_findings}개까지만, 각 message는 "
+            "2문장 이내로 간결하게 작성해주세요.)"
+        )
+        messages = await self._assemble_within_budget(
+            event,
+            targets,
+            related_context,
+            api_spec_context,
+            official_docs_context,
+            extra_user_suffix=suffix,
+        )
+        if messages is None:
+            logger.warning(
+                "truncation retry skipped, suffix does not fit budget reviewJobId=%s",
+                event.review_job_id,
+            )
+            return None
+
+        try:
+            output = await self._llm.generate(
+                messages,
+                max_tokens=self._max_tokens,
+                max_reviews=self._truncation_retry_max_findings,
+            )
+        except LLMOutputTruncatedError as exc:
+            # 재시도 출력도 잘리면, 추가 호출 없이 그 원문에서도 부분 복구를
+            # 한 번 더 시도한다.
+            recovered = parse_partial_review_output(exc.raw_content)
+            if recovered is None:
+                logger.warning(
+                    "truncation retry also truncated with nothing recoverable "
+                    "reviewJobId=%s",
+                    event.review_job_id,
+                )
+                return None
+            logger.info(
+                "truncation retry recovered after retry reviewJobId=%s "
+                "recoveredFindings=%d duplicatesRemoved=%d",
+                event.review_job_id,
+                len(recovered.output.reviews),
+                recovered.duplicates_removed,
+            )
+            output = recovered.output
+        except Exception:
+            logger.warning(
+                "truncation retry call failed reviewJobId=%s",
+                event.review_job_id,
+                exc_info=True,
+            )
+            return None
+
+        if len(output.reviews) > self._truncation_retry_max_findings:
+            # response_format의 maxItems(문법 차원 제한)를 서버가 실제로
+            # 지키는지 확인되지 않았으므로, 파이썬에서도 강제한다.
+            output.reviews = output.reviews[: self._truncation_retry_max_findings]
+        return output
 
     async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
         """swagger가 없고 DOVI.md에 Notion API 명세 링크가 있으면 저장해 둔다.
@@ -983,6 +1106,7 @@ class ReviewPipeline:
         context_max_chars: int | None = None,
         pr_body_max_chars: int | None = None,
         diff_max_chars: int | None = None,
+        extra_user_suffix: str = "",
     ) -> tuple[list[ChatMessage], dict[str, str]]:
         """override 인자(*_max_chars)를 전부 안 주면(=None) 오늘의 문자 기반 조립
         로직과 100% 동일하게 동작한다 — `_assemble_within_budget()`이 예산 초과가
@@ -991,6 +1115,10 @@ class ReviewPipeline:
         조립된 messages와 함께, 축소 캐스케이드가 각 섹션의 현재 크기를 알 수
         있도록 섹션별 원문(context/pr_section/diff/api_spec_context/
         official_docs_context)도 함께 반환한다.
+
+        extra_user_suffix는 잘림 재시도(이슈 #99)에서 user 메시지 끝에 짧게
+        쓰라는 지시문을 붙일 때 쓴다 — 기본값 ""이면 오늘과 완전히 동일하고,
+        값이 있으면 그만큼도 실측 토큰 수에 포함돼 예산 재검사를 통과한다.
         """
         blocks = [
             (t.file_path, self._render_target(t, related_context.get(t.file_path, [])))
@@ -1027,6 +1155,7 @@ class ReviewPipeline:
         user = pr_section + user
         user += api_spec_context
         user += official_docs_context
+        user += extra_user_suffix
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user},

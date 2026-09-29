@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # 조정 가능하게 한다(이슈 #98).
     llm_max_tokens: int = 1500
     llm_verify_max_tokens: int = 800
+    # 출력이 잘려 부분 복구도 실패했을 때, 짧게 다시 요청하며 허용하는 finding
+    # 최대 개수(이슈 #99).
+    llm_truncation_retry_max_findings: int = 5
 
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)

@@ -6,6 +6,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from app.llm.errors import LLMOutputTruncatedError
 from app.llm.openai_compatible_client import OpenAICompatibleLLMClient
 from app.review.schema import ReviewModelOutput, VerificationResult
 
@@ -284,6 +285,95 @@ async def test_generate_records_finish_reason_length_in_langfuse_metadata(
     await client.generate([{"role": "user", "content": "hi"}])
 
     assert fake_langfuse.calls[1]["metadata"] == {"finish_reason": "length"}
+
+
+async def test_generate_raises_truncated_error_when_length_and_invalid_json() -> None:
+    truncated = '{"summary": "s", "reviews": [{"severity": "major"'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": truncated}, "finish_reason": "length"}],
+                "usage": {"completion_tokens": 10},
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(LLMOutputTruncatedError) as exc_info:
+        await client.generate([{"role": "user", "content": "hi"}])
+    assert exc_info.value.raw_content == truncated
+
+
+async def test_generate_raises_plain_value_error_when_not_length_and_invalid_json() -> None:
+    # finish_reason이 "length"가 아니면 잘림이 아니라 형식 오류다 —
+    # LLMOutputTruncatedError가 아닌 일반 ValueError여야 한다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "not json"}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 10},
+            },
+        )
+
+    client = _client(handler)
+
+    with pytest.raises(ValueError) as exc_info:
+        await client.generate([{"role": "user", "content": "hi"}])
+    assert not isinstance(exc_info.value, LLMOutputTruncatedError)
+
+
+async def test_generate_returns_normally_when_length_but_json_is_valid() -> None:
+    # 출력이 max_tokens에 걸렸어도 JSON 자체는 완성됐다면(정확히 그 지점에서
+    # 끝난 경우) 잘림 예외를 던지지 않고 정상 반환해야 한다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": _VALID_CONTENT}, "finish_reason": "length"}],
+                "usage": {"completion_tokens": 10},
+            },
+        )
+
+    client = _client(handler)
+    result = await client.generate([{"role": "user", "content": "hi"}])
+
+    assert isinstance(result, ReviewModelOutput)
+    assert result.summary == "ok"
+
+
+async def test_generate_with_max_reviews_sends_maxitems_and_maxlength_in_schema() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _openai_response(_VALID_CONTENT)
+
+    client = _client(handler)
+    await client.generate([{"role": "user", "content": "hi"}], max_reviews=3)
+
+    schema = captured["body"]["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["reviews"]["maxItems"] == 3
+    assert schema["$defs"]["ReviewComment"]["properties"]["message"]["maxLength"] > 0
+
+
+async def test_generate_with_max_reviews_does_not_mutate_shared_schema() -> None:
+    # _truncation_retry_schema()는 self._schema의 깊은 복사본만 수정해야 한다 —
+    # 안 그러면 max_reviews 없이 부르는 다음 generate() 호출까지 오염된다.
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return _openai_response(_VALID_CONTENT)
+
+    client = _client(handler)
+    await client.generate([{"role": "user", "content": "hi"}], max_reviews=3)
+    await client.generate([{"role": "user", "content": "hi"}])
+
+    second_schema = captured[1]["response_format"]["json_schema"]["schema"]
+    assert "maxItems" not in second_schema["properties"]["reviews"]
 
 
 async def test_count_tokens_calls_tokenize_on_v1_stripped_root() -> None:
