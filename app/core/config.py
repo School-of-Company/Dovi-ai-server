@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     kafka_consumer_enabled: bool = False
     # 배포로 종료 신호를 받았을 때, 처리 중인 리뷰를 강제 취소하기 전에 기다려주는
     # 최대 시간. llm_timeout_seconds보다 넉넉해야 정상 완료를 강제 취소로 놓치지 않는다.
-    graceful_shutdown_seconds: float = 130.0
+    graceful_shutdown_seconds: float = 260.0
 
     llm_profile: str = "dual_gpu_32gb"
     llm_base_url: str = "http://localhost:8001/v1"
@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # 출력이 잘려 부분 복구도 실패했을 때, 짧게 다시 요청하며 허용하는 finding
     # 최대 개수(이슈 #99).
     llm_truncation_retry_max_findings: int = 5
+    # 큰 PR을 나눠 리뷰할 때 LLM을 호출하는 최대 배치 수(이슈 #108). 상한을 넘는
+    # 파일은 리뷰하지 못하고 summary에 안내된다. 배치당 LLM 호출 1회라 소요
+    # 시간이 비례해 늘어난다.
+    review_max_batches: int = 12
 
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)

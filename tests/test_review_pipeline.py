@@ -2064,3 +2064,39 @@ async def test_run_summary_lists_omitted_files_grouped_by_directory() -> None:
     assert isinstance(result, ReviewCompletedEvent)
     assert "리뷰하지 못한 파일 6개: src/mod/ 6개" in result.summary
     assert "f10.ts" not in result.summary
+
+
+async def test_split_targets_respects_configured_max_review_batches() -> None:
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch)
+            for i in range(5)
+        ],
+    )
+    targets = analyze(event)
+    probe = _pipeline(FakeLLM())
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    pipeline = ReviewPipeline(
+        FakeLLM(token_counter=estimate_tokens),
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS,
+        max_tokens=max_tokens,
+        max_review_batches=2,
+    )
+
+    batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
+
+    assert len(batches) == 2
+    assert len(omitted) == 3

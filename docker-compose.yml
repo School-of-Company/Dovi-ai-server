@@ -7,9 +7,9 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
-    # graceful_shutdown_seconds(기본 130s)보다 넉넉해야 앱이 처리 중이던 리뷰를
+    # graceful_shutdown_seconds(기본 260s)보다 넉넉해야 앱이 처리 중이던 리뷰를
     # 마무리할 시간을 벌기 전에 SIGKILL 당하지 않는다.
-    stop_grace_period: 150s
+    stop_grace_period: 280s
     depends_on:
       # qdrant는 healthcheck가 없어 "컨테이너 시작"까지만 기다린다
       # (기존 리스트 형식 `- qdrant`와 동일한 의미).
