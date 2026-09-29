@@ -5,10 +5,12 @@ from pydantic import ValidationError
 
 from app.llm.client import ChatMessage
 from app.llm.errors import LLMOutputTruncatedError
+from app.llm.tokens import estimate_tokens
 from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.diff import analyze
 from app.review.pipeline import (
+    _MAX_REVIEW_BATCHES,
     _SAFETY_MARGIN_TOKENS,
     _SYSTEM_PROMPT,
     ReviewPipeline,
@@ -403,10 +405,13 @@ async def test_run_truncates_huge_single_new_file_diff() -> None:
     assert "...(truncated)" in user_message
 
 
-async def test_run_lists_dropped_file_names_when_multiple_files_exceed_budget() -> None:
+async def test_run_includes_all_files_across_batches_instead_of_dropping_them() -> None:
     # PR #84 실제 사례: 파일이 많은 정상 규모 PR에서 예산 초과로 뒤쪽 파일들이
-    # 통째로 드롭되자, 봇이 그 파일들을 "안 고쳐졌다"고 오탐했다. 드롭된 파일명이
-    # 유저 메시지에 남아 LLM이 최소한 그 파일이 바뀌었다는 사실은 알 수 있어야 한다.
+    # 통째로 드롭되자, 봇이 그 파일들을 "안 고쳐졌다"고 오탐했다. map-reduce
+    # (이슈 #108) 도입 후에는 예산을 넘는 파일들이 배치로 나뉘어 각각
+    # 리뷰되므로, 이 정도 규모(파일 4개)의 PR은 드롭 없이 전부 어떤 배치의
+    # 프롬프트에는 포함돼야 한다(생략은 배치 상한을 넘을 때만 발생 — 별도
+    # 테스트에서 다룸).
     def _big_patch(n: int) -> str:
         return f"@@ -0,0 +1,{n} @@\n" + "\n".join(f"+line {i}" for i in range(n))
 
@@ -427,12 +432,13 @@ async def test_run_lists_dropped_file_names_when_multiple_files_exceed_budget() 
     )
     fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
 
-    await _pipeline(fake).run(event)
+    result = await _pipeline(fake).run(event)
 
-    assert fake.received is not None
-    user_message = fake.received[1]["content"]
-    assert "tests/test_dropped.py" in user_message
-    assert "생략된 파일" in user_message
+    assert isinstance(result, ReviewCompletedEvent)
+    all_prompts = "".join(messages[1]["content"] for messages, _mt, _mr in fake.generate_calls)
+    assert "tests/test_dropped.py" in all_prompts
+    assert "생략된 파일" not in all_prompts  # 배치 안에서도 개별 파일이 드롭되지 않음
+    assert "배치 상한" not in result.summary  # 배치 상한을 넘지 않아 생략 고지도 없음
 
 
 async def test_run_shares_diff_budget_with_project_context() -> None:
@@ -1629,7 +1635,275 @@ async def test_retry_shortened_caps_review_count_in_python() -> None:
     event = _event()
     targets = analyze(event)
 
-    output = await pipeline._retry_shortened(event, targets, {}, "", "")
+    result = await pipeline._retry_shortened(event, targets, {}, "", "")
 
-    assert output is not None
+    assert result is not None
+    output, _messages = result
     assert len(output.reviews) == 5
+
+
+# --- 리뷰 파이프라인 내부 map-reduce (이슈 #108) ---
+
+
+async def test_split_targets_into_batches_splits_when_files_exceed_budget() -> None:
+    probe = _pipeline(FakeLLM())
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="a.py", status="modified", patch=big_patch),
+            ChangedFile(file_path="b.py", status="modified", patch=big_patch),
+            ChangedFile(file_path="c.py", status="modified", patch=big_patch),
+        ],
+    )
+    targets = analyze(event)
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    # 파일 1.5개 정도만 들어가는 빠듯한 예산 — 3개 파일이 최소 2개 배치로 나뉜다.
+    llm_max_context = (
+        common_tokens + int(one_file_tokens * 1.5) + max_tokens + _SAFETY_MARGIN_TOKENS
+    )
+    pipeline = ReviewPipeline(
+        FakeLLM(),
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
+
+    assert omitted == []
+    assert len(batches) >= 2
+    all_files = {t.file_path for batch in batches for t in batch}
+    assert all_files == {"a.py", "b.py", "c.py"}
+
+
+async def test_split_targets_into_batches_keeps_oversized_single_file_in_its_own_batch() -> None:
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[ChangedFile(file_path="huge.py", status="added", patch=huge_patch)],
+    )
+    targets = analyze(event)
+    pipeline = ReviewPipeline(
+        FakeLLM(), model_version="v", prompt_version="v1", llm_max_context=50, max_tokens=10
+    )
+
+    batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
+
+    assert omitted == []
+    assert len(batches) == 1
+    assert batches[0][0].file_path == "huge.py"
+
+
+async def test_split_targets_into_batches_caps_at_max_review_batches() -> None:
+    probe = _pipeline(FakeLLM())
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    changed_files = [
+        ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch) for i in range(7)
+    ]
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=changed_files,
+    )
+    targets = analyze(event)
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    # 파일 1개만 들어가는 예산 — 7개 파일이면 배치 7개가 필요하지만 상한(5)을 넘는다.
+    llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS
+    pipeline = ReviewPipeline(
+        FakeLLM(),
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
+
+    assert len(batches) == _MAX_REVIEW_BATCHES
+    assert len(omitted) == 7 - _MAX_REVIEW_BATCHES
+
+
+async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_budget() -> None:
+    """예산을 넘는 PR이 context_overflow 대신, 여러 배치의 finding을 합친
+    completed로 끝나야 한다(이슈 #108의 핵심 목표)."""
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    changed_files = [
+        ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch) for i in range(3)
+    ]
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=changed_files,
+    )
+    probe = _pipeline(FakeLLM())
+    targets = analyze(event)
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS
+
+    outputs = [
+        ReviewModelOutput(
+            summary=f"batch {i} 요약",
+            reviews=[
+                _comment(
+                    severity="critical",
+                    file_path=f"f{i}.py",
+                    line=1,
+                    title=f"finding-{i}",
+                )
+            ],
+        )
+        for i in range(3)
+    ]
+    fake = FakeLLM(sequence=list(outputs), token_counter=_realistic_token_counter)
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.call_count == 3
+    assert {r.file_path for r in result.reviews} == {"f0.py", "f1.py", "f2.py"}
+    assert "여러 배치로 나눠 리뷰했습니다" in result.summary
+    assert "batch 0 요약" in result.summary and "f0.py" in result.summary
+
+
+async def test_run_continues_processing_other_batches_when_one_batch_cannot_fit() -> None:
+    """한 배치가 diff_floor까지 줄여도 예산을 못 맞추면(파일이 유난히 커서),
+    그 배치는 생성 호출 없이 생략되고 다른 배치는 계속 처리돼야 한다."""
+    small_patch = "@@ -1 +1 @@\n-a\n+b"
+    huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
+    changed_files = [
+        ChangedFile(file_path="a.py", status="modified", patch=small_patch),
+        ChangedFile(file_path="huge.py", status="added", patch=huge_patch),
+        ChangedFile(file_path="c.py", status="modified", patch=small_patch),
+    ]
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=changed_files,
+    )
+    probe = _pipeline(FakeLLM())
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = _realistic_token_counter(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    max_tokens = 100
+    # 작은 파일들은 자기 자연 크기가 이미 diff_floor보다 작아 그대로 들어가지만,
+    # huge.py는 floor(약 500토큰)까지 줄여도 이 예산으로는 못 맞춘다.
+    llm_max_context = common_tokens + 100 + max_tokens + _SAFETY_MARGIN_TOKENS
+
+    fake = FakeLLM(
+        sequence=[
+            ReviewModelOutput(
+                summary="a", reviews=[_comment(file_path="a.py", line=1, severity="critical")]
+            ),
+            ReviewModelOutput(
+                summary="c", reviews=[_comment(file_path="c.py", line=1, severity="critical")]
+            ),
+        ],
+        token_counter=_realistic_token_counter,
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert fake.call_count == 2  # huge.py 배치는 생성 호출 자체가 없었다
+    assert {r.file_path for r in result.reviews} == {"a.py", "c.py"}
+    assert "huge.py" in result.summary
+
+
+async def test_run_fails_when_all_batches_fail_via_generate_error() -> None:
+    """모든 배치가 생성 단계(assembly 통과 후)에서 실패하면, context_overflow가
+    아니라 실제 실패 사유로 실패해야 한다."""
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path="a.py", status="modified", patch="@@ -1 +1 @@\n-a\n+b")
+        ],
+    )
+    fake = FakeLLM(error=RuntimeError("boom"))
+
+    result = await _pipeline(fake).run(event)
+
+    assert isinstance(result, ReviewFailedEvent)
+    assert result.reason == "server_error"
+
+
+async def test_verify_across_batches_verifies_each_batch_with_its_own_messages() -> None:
+    """배치 A의 finding은 배치 A의 messages(그 파일의 diff)로만, 배치 B의
+    finding은 배치 B의 messages로만 검증 요청이 나가야 한다 — 다른 배치의
+    diff가 섞여 들어가면 안 된다."""
+    messages_a: list[ChatMessage] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "diff for a.py"},
+    ]
+    messages_b: list[ChatMessage] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "diff for b.py"},
+    ]
+    review_a = _comment(file_path="a.py", line=1, title="finding-a")
+    review_b = _comment(file_path="b.py", line=1, title="finding-b")
+    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    pipeline = _pipeline(fake)
+
+    confirmed = await pipeline._verify_across_batches(
+        _event(),
+        [review_a, review_b],
+        {id(review_a): messages_a, id(review_b): messages_b},
+    )
+
+    assert len(fake.verify_calls) == 2
+    assert "diff for a.py" in fake.verify_calls[0][1]["content"]
+    assert "diff for b.py" not in fake.verify_calls[0][1]["content"]
+    assert "diff for b.py" in fake.verify_calls[1][1]["content"]
+    assert [r.file_path for r in confirmed] == ["a.py", "b.py"]
