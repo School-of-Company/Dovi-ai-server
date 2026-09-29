@@ -88,7 +88,7 @@ _MAX_VERIFY_BATCHES = 5
 # map-reduce), 배치 수가 이 이상이면 더 쪼개지 않고 남은 파일은 시도조차
 # 하지 않은 채 생략 목록으로 처리한다 — _MAX_VERIFY_BATCHES와 같은 값·같은
 # 철학(그 이상은 호출당 최대 120초가 배치 수만큼 곱해져 시간 비용이 더 크다).
-_MAX_REVIEW_BATCHES = 5
+_MAX_REVIEW_BATCHES = 8
 
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
@@ -100,6 +100,30 @@ _SUSPICIOUS_SUMMARY_LENGTH = 400
 # 있다 — 대소문자 구분 없이 무해한 문자열로 치환해 PR 작성자가 직접 닫는
 # 태그를 위조하지 못하게 막는다.
 _CLOSING_PR_DESCRIPTION_TAG = re.compile(re.escape("</pr_description>"), re.IGNORECASE)
+
+
+# 테스트/스펙 파일은 배치 상한에 걸려 일부만 리뷰해야 할 때 소스 파일보다 나중에
+# 배치에 넣는다(이슈 #108 후속) — 상한 초과 시 생략되는 쪽이 테스트 파일이 되게 한다.
+_LOW_PRIORITY_PATH = re.compile(
+    r"(^|/)(tests?|__tests__|e2e)(/|$)|[._-](spec|test)\.[A-Za-z0-9]+$|(^|/)test_[^/]*\.py$"
+)
+
+
+def _is_low_priority_path(path: str) -> bool:
+    return _LOW_PRIORITY_PATH.search(path) is not None
+
+
+def _format_omitted_files(paths: list[str]) -> str:
+    """생략된 파일 목록을 PR 작성자가 읽을 수 있게 접는다 — 5개 이하면 파일명을
+    그대로, 그 이상이면 디렉터리별 개수로 묶는다."""
+    if len(paths) <= 5:
+        return ", ".join(paths)
+    counts: dict[str, int] = {}
+    for path in paths:
+        directory = path.rsplit("/", 1)[0] + "/" if "/" in path else "(루트)"
+        counts[directory] = counts.get(directory, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{directory} {count}개" for directory, count in ordered)
 
 
 def _neutralize_closing_tag(text: str) -> str:
@@ -479,13 +503,15 @@ class ReviewPipeline:
             session_id=event.review_job_id,
             metadata={"repository_id": event.repository_id, "pr_number": event.pr_number},
         ):
-            for batch_targets in target_batches:
+            for batch_index, batch_targets in enumerate(target_batches):
+                include_shared = batch_index == 0
                 batch_messages = await self._assemble_within_budget(
                     event,
                     batch_targets,
                     related_context,
                     api_spec_context,
                     official_docs_context,
+                    include_shared=include_shared,
                 )
                 if batch_messages is None:
                     logger.warning(
@@ -503,6 +529,7 @@ class ReviewPipeline:
                     api_spec_context,
                     official_docs_context,
                     batch_messages,
+                    include_shared=include_shared,
                 )
                 if isinstance(result, str):
                     last_reason = result
@@ -523,7 +550,6 @@ class ReviewPipeline:
         # --- reduce ---
         all_llm_reviews: list[ReviewComment] = []
         review_to_messages: dict[int, list[ChatMessage]] = {}
-        summary_parts: list[str] = []
         for output, used_messages, file_list in successful:
             batch_llm_reviews = list(output.reviews)
             if len(batch_llm_reviews) == 0 and len(output.summary) > _SUSPICIOUS_SUMMARY_LENGTH:
@@ -537,21 +563,21 @@ class ReviewPipeline:
             for r in batch_llm_reviews:
                 review_to_messages[id(r)] = used_messages
             all_llm_reviews.extend(batch_llm_reviews)
-            if len(successful) == 1:
-                summary_parts.append(output.summary)
-            else:
-                summary_parts.append(f"- ({', '.join(file_list)}) {output.summary}")
 
-        combined_summary = (
-            summary_parts[0]
-            if len(successful) == 1
-            else "여러 배치로 나눠 리뷰했습니다:\n" + "\n".join(summary_parts)
-        )
-        if omitted_files:
-            combined_summary += (
-                f"\n\n(배치 상한 또는 예산 초과로 리뷰하지 못한 파일 "
-                f"{len(omitted_files)}개: {', '.join(omitted_files)})"
+        # 배치마다 PR 전체 개요를 반복 서술하므로 요약은 첫 배치 것만 쓰고, 나머지
+        # 배치의 지적 사항은 reviews[]에 이미 담겨 있다.
+        combined_summary = successful[0][0].summary
+        notes: list[str] = []
+        if len(successful) > 1:
+            notes.append(
+                f"변경 파일 {len(targets)}개를 {len(successful)}개 배치로 나눠 리뷰했습니다."
             )
+        if omitted_files:
+            notes.append(
+                f"리뷰하지 못한 파일 {len(omitted_files)}개: {_format_omitted_files(omitted_files)}"
+            )
+        if notes:
+            combined_summary += "\n\n" + "\n".join(f"({n})" for n in notes)
 
         all_reviews = list(all_llm_reviews)
         all_reviews.extend(dependency_findings)
@@ -885,6 +911,7 @@ class ReviewPipeline:
         official_docs_context: str,
         *,
         extra_user_suffix: str = "",
+        include_shared: bool = True,
     ) -> list[ChatMessage] | None:
         """오늘의 _build_messages() 결과를 실측 토큰 수로 검증하고, 예산을 넘으면
         보조 정보부터 순서대로 줄여 재조립한다(이슈 #98).
@@ -930,6 +957,7 @@ class ReviewPipeline:
                 pr_body_max_chars=overrides.get("pr_body"),
                 diff_max_chars=overrides.get("diff"),
                 extra_user_suffix=extra_user_suffix,
+                include_shared=include_shared,
             )
             text = messages[0]["content"] + messages[1]["content"]
             actual = await self._count_tokens(text)
@@ -983,6 +1011,8 @@ class ReviewPipeline:
         related_context: dict[str, list[ChunkSearchResult]],
         api_spec_context: str,
         official_docs_context: str,
+        *,
+        include_shared: bool = True,
     ) -> tuple[ReviewModelOutput, list[ChatMessage]] | None:
         """잘림 후 부분 복구도 실패했을 때, finding 개수·길이를 줄여 딱 1회 더
         요청한다(이슈 #99).
@@ -1009,6 +1039,7 @@ class ReviewPipeline:
             api_spec_context,
             official_docs_context,
             extra_user_suffix=suffix,
+            include_shared=include_shared,
         )
         if messages is None:
             logger.warning(
@@ -1064,6 +1095,8 @@ class ReviewPipeline:
         api_spec_context: str,
         official_docs_context: str,
         messages: list[ChatMessage],
+        *,
+        include_shared: bool = True,
     ) -> tuple[ReviewModelOutput, list[ChatMessage]] | FailureReason:
         """배치 하나를 생성한다(이슈 #108) — run()의 예전 단일 호출 재시도
         로직(parse_error/server_error 1회 재시도, timeout 즉시 실패, 출력
@@ -1106,6 +1139,7 @@ class ReviewPipeline:
                     related_context,
                     api_spec_context,
                     official_docs_context,
+                    include_shared=include_shared,
                 )
                 if retried is None:
                     return "output_truncated"
@@ -1138,11 +1172,13 @@ class ReviewPipeline:
 
         (배치 목록, 배치 상한 초과로 애초에 시도조차 안 하는 파일 목록)을
         반환한다. 실제 예산 확정은 각 배치가 조립될 때 _assemble_within_
-        budget()이 실측 토큰으로 다시 검증하므로, 여기서는 배치 "경계"만
-        정하면 된다 — _split_findings_into_batches()(verify용)와 같은
-        이유로 실측(/tokenize) 대신 폴백 estimate_tokens()만 쓴다(과다추정
-        이라 배치가 실제보다 잘게 나뉠 뿐, 예산을 넘기는 방향으로는 틀리지
-        않는다 — 매 파일마다 /tokenize를 부르지 않아도 된다).
+        budget()이 다시 검증한다. 경계도 실측 토큰(count_tokens, 실패 시
+        폴백)으로 정한다 — 폴백 추정은 실제보다 훨씬 많이 세서 배치가 불필요
+        하게 잘게 나뉘고, 상한에 걸려 리뷰 못 하는 파일이 늘기 때문이다.
+
+        첫 배치에만 PR 본문·프로젝트 컨텍스트를 넣으므로 공통 오버헤드를
+        첫 배치와 나머지로 나눠 계산한다. 배치가 여러 개 필요하면 테스트/스펙
+        파일을 뒤로 보내 상한 초과 시 그쪽이 생략되게 한다.
 
         한 파일이 그 자체로도 예산을 넘으면(초대형 파일) 쫓아내지 않고 자기
         배치에 혼자 들어간다 — 그 배치는 _assemble_within_budget()의 기존
@@ -1153,27 +1189,48 @@ class ReviewPipeline:
         effective_max_context = await self._resolve_max_context()
         budget = effective_max_context - self._max_tokens - _SAFETY_MARGIN_TOKENS
 
-        common_messages, _ = self._build_messages(
-            event, [], related_context, api_spec_context, official_docs_context
-        )
-        common_tokens = estimate_tokens(
-            common_messages[0]["content"] + common_messages[1]["content"]
-        )
+        async def common_tokens_for(include_shared: bool) -> int:
+            messages, _ = self._build_messages(
+                event,
+                [],
+                related_context,
+                api_spec_context,
+                official_docs_context,
+                include_shared=include_shared,
+            )
+            return await self._count_tokens(messages[0]["content"] + messages[1]["content"])
 
-        batches: list[list[ReviewTarget]] = []
-        current: list[ReviewTarget] = []
-        current_tokens = common_tokens
-        for target in targets:
-            rendered = self._render_target(target, related_context.get(target.file_path, []))
-            target_tokens = estimate_tokens(rendered)
-            if current and current_tokens + target_tokens > budget:
-                batches.append(current)
-                current = []
-                current_tokens = common_tokens
-            current.append(target)
-            current_tokens += target_tokens
-        if current:
-            batches.append(current)
+        common_first = await common_tokens_for(True)
+        common_rest = await common_tokens_for(False)
+        target_tokens = {
+            t.file_path: await self._count_tokens(
+                self._render_target(t, related_context.get(t.file_path, []))
+            )
+            for t in targets
+        }
+
+        def pack(ordered: list[ReviewTarget]) -> list[list[ReviewTarget]]:
+            packed: list[list[ReviewTarget]] = []
+            current: list[ReviewTarget] = []
+            current_tokens = common_first
+            for target in ordered:
+                tokens = target_tokens[target.file_path]
+                if current and current_tokens + tokens > budget:
+                    packed.append(current)
+                    current = []
+                    current_tokens = common_rest
+                current.append(target)
+                current_tokens += tokens
+            if current:
+                packed.append(current)
+            return packed
+
+        batches = pack(targets)
+        if len(batches) > 1:
+            # 배치가 여러 개 필요할 때만 소스 파일을 앞으로 당겨, 상한 초과 시
+            # 생략되는 쪽이 테스트/스펙 파일이 되게 한다(한 배치면 순서 무변경).
+            ordered = sorted(targets, key=lambda t: _is_low_priority_path(t.file_path))
+            batches = pack(ordered)
 
         omitted_files: list[str] = []
         if len(batches) > _MAX_REVIEW_BATCHES:
@@ -1311,6 +1368,7 @@ class ReviewPipeline:
         pr_body_max_chars: int | None = None,
         diff_max_chars: int | None = None,
         extra_user_suffix: str = "",
+        include_shared: bool = True,
     ) -> tuple[list[ChatMessage], dict[str, str]]:
         """override 인자(*_max_chars)를 전부 안 주면(=None) 오늘의 문자 기반 조립
         로직과 100% 동일하게 동작한다 — `_assemble_within_budget()`이 예산 초과가
@@ -1334,6 +1392,11 @@ class ReviewPipeline:
         context = build_context(event.context_files, **context_kwargs)
 
         pr_section = self._build_pr_description_section(event)
+        if not include_shared:
+            # 2번째 이후 배치에는 PR 본문·프로젝트 컨텍스트를 반복해 넣지 않는다 —
+            # 배치마다 같은 내용이 프롬프트 예산을 잡아먹고 요약도 반복시킨다.
+            context = ""
+            pr_section = ""
         if pr_body_max_chars is not None:
             pr_section = _shrink_to_char_limit(pr_section, pr_body_max_chars)
 

@@ -430,7 +430,9 @@ async def test_run_includes_all_files_across_batches_instead_of_dropping_them() 
             ),
         ],
     )
-    fake = FakeLLM(output=ReviewModelOutput(summary="ok", reviews=[]))
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]), token_counter=estimate_tokens
+    )
 
     result = await _pipeline(fake).run(event)
 
@@ -1672,7 +1674,7 @@ async def test_split_targets_into_batches_splits_when_files_exceed_budget() -> N
         common_tokens + int(one_file_tokens * 1.5) + max_tokens + _SAFETY_MARGIN_TOKENS
     )
     pipeline = ReviewPipeline(
-        FakeLLM(),
+        FakeLLM(token_counter=estimate_tokens),
         model_version="v",
         prompt_version="v1",
         llm_max_context=llm_max_context,
@@ -1713,7 +1715,8 @@ async def test_split_targets_into_batches_caps_at_max_review_batches() -> None:
     probe = _pipeline(FakeLLM())
     big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
     changed_files = [
-        ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch) for i in range(7)
+        ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch)
+        for i in range(_MAX_REVIEW_BATCHES + 2)
     ]
     event = ReviewRequestedEvent(
         review_job_id=make_review_job_id(42, 7, "abc123"),
@@ -1730,10 +1733,10 @@ async def test_split_targets_into_batches_caps_at_max_review_batches() -> None:
     )
     one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
     max_tokens = 100
-    # 파일 1개만 들어가는 예산 — 7개 파일이면 배치 7개가 필요하지만 상한(5)을 넘는다.
+    # 파일 1개만 들어가는 예산 — 상한+2개 파일이면 배치가 상한을 2개 넘는다.
     llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS
     pipeline = ReviewPipeline(
-        FakeLLM(),
+        FakeLLM(token_counter=estimate_tokens),
         model_version="v",
         prompt_version="v1",
         llm_max_context=llm_max_context,
@@ -1743,7 +1746,7 @@ async def test_split_targets_into_batches_caps_at_max_review_batches() -> None:
     batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
 
     assert len(batches) == _MAX_REVIEW_BATCHES
-    assert len(omitted) == 7 - _MAX_REVIEW_BATCHES
+    assert len(omitted) == 2
 
 
 async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_budget() -> None:
@@ -1769,7 +1772,7 @@ async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_b
     )
     one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
     max_tokens = 100
-    llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS
+    llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS + 50
 
     outputs = [
         ReviewModelOutput(
@@ -1785,7 +1788,7 @@ async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_b
         )
         for i in range(3)
     ]
-    fake = FakeLLM(sequence=list(outputs), token_counter=_realistic_token_counter)
+    fake = FakeLLM(sequence=list(outputs), token_counter=estimate_tokens)
     pipeline = ReviewPipeline(
         fake,
         model_version="v",
@@ -1799,8 +1802,10 @@ async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_b
     assert isinstance(result, ReviewCompletedEvent)
     assert fake.call_count == 3
     assert {r.file_path for r in result.reviews} == {"f0.py", "f1.py", "f2.py"}
-    assert "여러 배치로 나눠 리뷰했습니다" in result.summary
-    assert "batch 0 요약" in result.summary and "f0.py" in result.summary
+    assert "3개 배치로 나눠 리뷰했습니다" in result.summary
+    assert "batch 0 요약" in result.summary  # 첫 배치 요약만 쓴다
+    assert "batch 1 요약" not in result.summary
+    assert "batch 2 요약" not in result.summary
 
 
 async def test_run_continues_processing_other_batches_when_one_batch_cannot_fit() -> None:
@@ -1907,3 +1912,155 @@ async def test_verify_across_batches_verifies_each_batch_with_its_own_messages()
     assert "diff for b.py" not in fake.verify_calls[0][1]["content"]
     assert "diff for b.py" in fake.verify_calls[1][1]["content"]
     assert [r.file_path for r in confirmed] == ["a.py", "b.py"]
+
+
+# --- map-reduce 가독성·커버리지 개선 ---
+
+
+def test_is_low_priority_path_detects_test_and_spec_files() -> None:
+    from app.review.pipeline import _is_low_priority_path
+
+    assert _is_low_priority_path("src/auth/jwt-auth.guard.spec.ts")
+    assert _is_low_priority_path("test/auth.e2e-spec.ts")
+    assert _is_low_priority_path("tests/test_review_pipeline.py")
+    assert not _is_low_priority_path("src/main.ts")
+    assert not _is_low_priority_path("app/review/pipeline.py")
+    assert not _is_low_priority_path("src/latest/handler.ts")
+
+
+def test_format_omitted_files_lists_few_and_groups_many() -> None:
+    from app.review.pipeline import _format_omitted_files
+
+    assert _format_omitted_files(["a.py", "src/b.py"]) == "a.py, src/b.py"
+    many = [f"src/proxy/f{i}.ts" for i in range(4)] + [f"test/t{i}.ts" for i in range(3)]
+    many.append("main.ts")
+    assert _format_omitted_files(many) == "src/proxy/ 4개, test/ 3개, (루트) 1개"
+
+
+async def test_split_targets_puts_source_files_before_test_files_when_batching() -> None:
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    paths = ["a.spec.ts", "src/b.ts", "test/c.e2e-spec.ts", "src/d.ts"]
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path=p, status="modified", patch=big_patch) for p in paths
+        ],
+    )
+    targets = analyze(event)
+    probe = _pipeline(FakeLLM())
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    llm_max_context = common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS
+    pipeline = ReviewPipeline(
+        FakeLLM(token_counter=estimate_tokens),
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    batches, _omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
+
+    order = [t.file_path for batch in batches for t in batch]
+    assert order == ["src/b.ts", "src/d.ts", "a.spec.ts", "test/c.e2e-spec.ts"]
+
+
+async def test_later_batches_omit_pr_description_and_project_context() -> None:
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        pr_title="게이트웨이 구현",
+        pr_body="PR 본문 내용",
+        changed_files=[
+            ChangedFile(file_path=f"f{i}.py", status="modified", patch=big_patch)
+            for i in range(2)
+        ],
+        context_files=[ContextFile(path="DOVI.md", content="프로젝트 컨텍스트 내용")],
+    )
+    targets = analyze(event)
+    probe = _pipeline(FakeLLM())
+    first, _ = probe._build_messages(event, [], {}, "", "")
+    rest, _ = probe._build_messages(event, [], {}, "", "", include_shared=False)
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    llm_max_context = (
+        estimate_tokens(first[0]["content"] + first[1]["content"])
+        + one_file_tokens
+        + max_tokens
+        + _SAFETY_MARGIN_TOKENS
+        + 50
+    )
+    assert estimate_tokens(rest[1]["content"]) < estimate_tokens(first[1]["content"])
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="ok", reviews=[]), token_counter=estimate_tokens
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    await pipeline.run(event)
+
+    assert len(fake.generate_calls) == 2
+    first_user = fake.generate_calls[0][0][1]["content"]
+    second_user = fake.generate_calls[1][0][1]["content"]
+    assert "PR 본문 내용" in first_user and "프로젝트 컨텍스트 내용" in first_user
+    assert "PR 본문 내용" not in second_user
+    assert "프로젝트 컨텍스트 내용" not in second_user
+
+
+async def test_run_summary_lists_omitted_files_grouped_by_directory() -> None:
+    big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
+    paths = [f"src/mod/f{i}.ts" for i in range(_MAX_REVIEW_BATCHES + 6)]
+    event = ReviewRequestedEvent(
+        review_job_id=make_review_job_id(42, 7, "abc123"),
+        repository_id=42,
+        pr_number=7,
+        head_sha="abc123",
+        base_sha="def456",
+        changed_files=[
+            ChangedFile(file_path=p, status="modified", patch=big_patch) for p in paths
+        ],
+    )
+    targets = analyze(event)
+    probe = _pipeline(FakeLLM())
+    common_messages, _ = probe._build_messages(event, [], {}, "", "")
+    common_tokens = estimate_tokens(
+        common_messages[0]["content"] + common_messages[1]["content"]
+    )
+    one_file_tokens = estimate_tokens(probe._render_target(targets[0], []))
+    max_tokens = 100
+    llm_max_context = (
+        common_tokens + one_file_tokens + max_tokens + _SAFETY_MARGIN_TOKENS + 50
+    )
+    fake = FakeLLM(
+        output=ReviewModelOutput(summary="개요", reviews=[]), token_counter=estimate_tokens
+    )
+    pipeline = ReviewPipeline(
+        fake,
+        model_version="v",
+        prompt_version="v1",
+        llm_max_context=llm_max_context,
+        max_tokens=max_tokens,
+    )
+
+    result = await pipeline.run(event)
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert "리뷰하지 못한 파일 6개: src/mod/ 6개" in result.summary
+    assert "f10.ts" not in result.summary
