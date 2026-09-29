@@ -33,6 +33,36 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    restart: unless-stopped
+    # 리뷰 컨슈머는 순차 처리라 슬롯 여러 개를 둘 근거가 없고, np를 비우면
+    # (auto) llama-server가 슬롯을 여러 개 잡으면서 --kv-unified도 자동으로
+    # 켜져 여러 요청이 8192 KV 캐시 풀을 나눠 쓰게 된다 — /props가 보고하는
+    # n_ctx(8192)가 실제로 한 요청이 쓸 수 있는 양보다 낙관적일 수 있다는
+    # 뜻이다(이슈 #106). comment_answer 파이프라인과의 동시 요청은 실패
+    # 대신 대기하는 쪽이 안전해 슬롯을 1개로 고정한다.
+    command:
+      [
+        "-m", "/models/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+        "-ngl", "99",
+        "-c", "8192",
+        "-np", "1",
+        "--host", "0.0.0.0",
+        "--port", "8000",
+      ]
+    ports:
+      - "8001:8000"
+    volumes:
+      - /home/ubuntu/models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   # --- Langfuse self-hosted (LLM 호출 트레이싱) ---
   # LANGFUSE_ENABLED=true일 때만 app/main.py가 클라이언트를 초기화한다.
   # 아래 langfuse-* 스택은 그 트레이스를 받는 서버 쪽 구성이다.
