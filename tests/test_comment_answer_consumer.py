@@ -40,6 +40,12 @@ class FakeTextLLM:
     ) -> str:
         return self._text
 
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
+
 
 class FailingTextLLM:
     async def generate_text(
@@ -47,12 +53,24 @@ class FailingTextLLM:
     ) -> str:
         raise RuntimeError("boom")
 
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
+
 
 class CancellingTextLLM:
     async def generate_text(
         self, messages: list[ChatMessage], *, max_tokens: int = 500
     ) -> str:
         raise asyncio.CancelledError()
+
+    async def count_tokens(self, text: str) -> int:
+        return 1
+
+    async def get_context_window(self) -> int | None:
+        return None
 
 
 class FakeProducer:
