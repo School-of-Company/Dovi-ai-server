@@ -88,7 +88,7 @@ _MAX_VERIFY_BATCHES = 5
 # map-reduce), 배치 수가 이 이상이면 더 쪼개지 않고 남은 파일은 시도조차
 # 하지 않은 채 생략 목록으로 처리한다 — _MAX_VERIFY_BATCHES와 같은 값·같은
 # 철학(그 이상은 호출당 최대 120초가 배치 수만큼 곱해져 시간 비용이 더 크다).
-_MAX_REVIEW_BATCHES = 8
+_MAX_REVIEW_BATCHES = 12
 
 # 프롬프트가 "1-3 concrete sentences"를 요구하므로, reviews[]가 비어있는데
 # summary가 이보다 훨씬 길면 finding이 reviews[] 대신 summary 프로즈에 새어
@@ -425,6 +425,7 @@ class ReviewPipeline:
         max_tokens: int = 1500,
         verify_max_tokens: int = 800,
         truncation_retry_max_findings: int = 5,
+        max_review_batches: int = _MAX_REVIEW_BATCHES,
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
@@ -438,6 +439,7 @@ class ReviewPipeline:
         self._max_tokens = max_tokens
         self._verify_max_tokens = verify_max_tokens
         self._truncation_retry_max_findings = truncation_retry_max_findings
+        self._max_review_batches = max_review_batches
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
@@ -1233,15 +1235,15 @@ class ReviewPipeline:
             batches = pack(ordered)
 
         omitted_files: list[str] = []
-        if len(batches) > _MAX_REVIEW_BATCHES:
-            dropped = batches[_MAX_REVIEW_BATCHES:]
+        if len(batches) > self._max_review_batches:
+            dropped = batches[self._max_review_batches :]
             omitted_files = [t.file_path for batch in dropped for t in batch]
             logger.warning(
                 "review batch cap exceeded reviewJobId=%s droppedFiles=%d",
                 event.review_job_id,
                 len(omitted_files),
             )
-            batches = batches[:_MAX_REVIEW_BATCHES]
+            batches = batches[: self._max_review_batches]
         return batches, omitted_files
 
     async def _maybe_save_notion_link(self, event: ReviewRequestedEvent) -> None:
