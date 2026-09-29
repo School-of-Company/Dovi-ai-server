@@ -14,3 +14,7 @@ __pycache__/
 
 # pytest
 .pytest_cache/
+
+# 컨텍스트 효과 오프라인 평가 (docs/evaluation/context-effect.md)
+eval-data/
+eval-results/
