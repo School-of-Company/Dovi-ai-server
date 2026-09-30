@@ -1802,8 +1802,8 @@ async def test_run_completes_with_merged_findings_when_pr_exceeds_single_batch_b
     assert isinstance(result, ReviewCompletedEvent)
     assert fake.call_count == 3
     assert {r.file_path for r in result.reviews} == {"f0.py", "f1.py", "f2.py"}
-    assert "3개 배치로 나눠 리뷰했습니다" in result.summary
-    assert "batch 0 요약" in result.summary  # 첫 배치 요약만 쓴다
+    assert "배치" not in result.summary  # 내부 사정은 사용자에게 안내하지 않는다
+    assert "batch 0 요약" in result.summary  # 요약 재생성기가 없으면 첫 배치 요약을 쓴다
     assert "batch 1 요약" not in result.summary
     assert "batch 2 요약" not in result.summary
 
