@@ -53,6 +53,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not fixture_replay'"
+markers = [
+    "fixture_replay: 실제 clone과 Docker 빌드/기동이 필요한 샌드박스 프로브 fixture 재생 (기본 실행에서 제외)",
+]
 
 [tool.ruff]
 line-length = 100

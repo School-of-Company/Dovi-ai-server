@@ -1,0 +1,18 @@
+[Unit]
+Description=Dovi sandbox probe worker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Dovi-ai-server
+EnvironmentFile=/home/ubuntu/Dovi-ai-server/.env
+ExecStart=/home/ubuntu/.local/bin/uv run --frozen --no-dev --no-sync uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
