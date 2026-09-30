@@ -3,6 +3,7 @@ from typing import Any, Protocol
 
 from app.comment_answer.schema import CommentAnswerCompletedEvent, CommentAnswerFailedEvent
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent
+from app.sandbox_probe.schema import SandboxProbeCompletedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -108,4 +109,31 @@ class CommentAnswerEventProducer:
             raise
         logger.info(
             "published commentJobId=%s topic=%s", event.comment_job_id, topic
+        )
+
+
+class SandboxProbeEventProducer:
+    """샌드박스 프로브 결과 이벤트를 Kafka에 발행한다."""
+
+    def __init__(self, sender: MessageSender, *, completed_topic: str) -> None:
+        self._sender = sender
+        self._completed_topic = completed_topic
+
+    async def publish_completed(self, event: SandboxProbeCompletedEvent) -> None:
+        key = event.review_job_id.encode("utf-8")
+        value = event.model_dump_json(by_alias=True).encode("utf-8")
+        try:
+            await self._sender.send_and_wait(self._completed_topic, value=value, key=key)
+        except Exception:
+            logger.exception(
+                "failed to publish reviewJobId=%s topic=%s",
+                event.review_job_id,
+                self._completed_topic,
+            )
+            raise
+        logger.info(
+            "published reviewJobId=%s topic=%s status=%s",
+            event.review_job_id,
+            self._completed_topic,
+            event.status,
         )

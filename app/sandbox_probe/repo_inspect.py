@@ -103,8 +103,7 @@ def build_probe_env(
     classification: EnvClassification,
     example: Mapping[str, str],
     *,
-    sidecar_host: str,
-    sidecar_port: int,
+    resolve_sidecar: Callable[[str], tuple[str, int]],
     mock_url: str,
     make_secret: Callable[[], str],
 ) -> dict[str, str]:
@@ -112,6 +111,7 @@ def build_probe_env(
 
     for name in classification.database:
         value = example.get(name, "")
+        sidecar_host, sidecar_port = resolve_sidecar(name)
         if name.endswith(("_URL", "_URI")) and "://" in value:
             env[name] = rewrite_db_url(value, sidecar_host, sidecar_port)
         elif name.endswith("_HOST"):
@@ -150,6 +150,9 @@ def detect_toolchain(
     package_json: str,
     lockfiles: Collection[str],
     ci_workflows: Iterable[str],
+    *,
+    node_version_files: Iterable[str] = (),
+    default_node_major: str | None = None,
 ) -> Toolchain | None:
     try:
         pkg = json.loads(package_json)
@@ -181,11 +184,17 @@ def detect_toolchain(
     if isinstance(engines, dict) and isinstance(engines.get("node"), str):
         node_major = _first_int(engines["node"])
     if node_major is None:
+        node_major = next(
+            (major for text in node_version_files if (major := _first_int(text))), None
+        )
+    if node_major is None:
         for workflow in ci_workflows:
             match = re.search(r"node-version:\s*\[?\s*['\"]?(\d+)", workflow)
             if match:
                 node_major = match.group(1)
                 break
+    if node_major is None:
+        node_major = default_node_major
     if node_major is None:
         return None
 

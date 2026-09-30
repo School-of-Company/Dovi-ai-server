@@ -1,7 +1,8 @@
 import json
 
-from app.kafka.producer import ReviewEventProducer
+from app.kafka.producer import ReviewEventProducer, SandboxProbeEventProducer
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent
+from app.sandbox_probe.schema import Finding, SandboxProbeCompletedEvent
 
 
 class FakeSender:
@@ -60,3 +61,28 @@ async def test_publish_failed_sends_to_failed_topic() -> None:
     assert key == b"1:2:sha"
     payload = json.loads(value)
     assert payload["reason"] == "timeout"
+
+
+async def test_sandbox_probe_producer_sends_camel_case_event_keyed_by_review_job_id() -> None:
+    sender = FakeSender()
+    producer = SandboxProbeEventProducer(sender, completed_topic="pr.sandbox.probe.completed")
+    event = SandboxProbeCompletedEvent(
+        review_job_id="1:2:sha",
+        repository_id=1,
+        pr_number=2,
+        head_sha="sha",
+        status="found_issue",
+        findings=[
+            Finding(probe="lifecycle", title="t", message="m", evidence="e", line=None)
+        ],
+    )
+
+    await producer.publish_completed(event)
+
+    topic, value, key = sender.sent[0]
+    assert topic == "pr.sandbox.probe.completed"
+    assert key == b"1:2:sha"
+    payload = json.loads(value)
+    assert payload["status"] == "found_issue"
+    assert payload["findings"][0]["probe"] == "lifecycle"
+    assert payload["findings"][0]["filePath"] is None

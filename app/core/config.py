@@ -24,6 +24,23 @@ class Settings(BaseSettings):
     # 위해 기본값은 true다.
     review_consumer_enabled: bool = True
     comment_answer_consumer_enabled: bool = True
+    kafka_sandbox_probe_request_topic: str = "pr.sandbox.probe.requested"
+    kafka_sandbox_probe_completed_topic: str = "pr.sandbox.probe.completed"
+    # 기본 False: 샌드박스 프로브는 신뢰할 수 없는 PR 코드를 실제로 실행하므로 Docker가 있는
+    # 전용 VM에서만 켠다(이슈 #97). 그 VM은 review/comment-answer 컨슈머를 끄고 배포한다.
+    sandbox_probe_consumer_enabled: bool = False
+    sandbox_probe_concurrency: int = 4
+    sandbox_probe_job_timeout_seconds: float = 900.0
+    sandbox_probe_max_poll_interval_ms: int = 1_200_000
+    sandbox_probe_max_attempts: int = 2
+    sandbox_probe_dedup_ttl_seconds: int = 1800
+    sandbox_probe_workdir: str = "/var/lib/dovi-sandbox"
+    sandbox_probe_min_free_disk_gb: float = 5.0
+    # 레포에서 Node 버전을 알아낼 수 없을 때 쓰는 기본 major 버전.
+    sandbox_probe_default_node_major: str = "24"
+    # github-app 내부 API(scoped installation token 발급). 키는 github-app에만 둔다.
+    github_app_internal_url: str = ""
+    github_app_internal_secret: str = ""
     # 배포로 종료 신호를 받았을 때, 처리 중인 리뷰를 강제 취소하기 전에 기다려주는
     # 최대 시간. llm_timeout_seconds보다 넉넉해야 정상 완료를 강제 취소로 놓치지 않는다.
     graceful_shutdown_seconds: float = 260.0

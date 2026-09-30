@@ -10,6 +10,7 @@ _CONSUMER_GROUP_ID = "dovi-ai-review-engine"
 _COMMENT_ANSWER_CONSUMER_GROUP_ID = "dovi-ai-comment-answer-engine"
 _REVIEW_FEEDBACK_CONSUMER_GROUP_ID = "dovi-ai-review-feedback-engine"
 _REPO_INDEX_CONSUMER_GROUP_ID = "dovi-ai-repo-index-engine"
+_SANDBOX_PROBE_CONSUMER_GROUP_ID = "dovi-ai-sandbox-probe-engine"
 
 
 def create_producer(settings: Settings) -> AIOKafkaProducer:
@@ -83,4 +84,23 @@ def create_repo_index_consumer(settings: Settings) -> AIOKafkaConsumer:
         group_id=_REPO_INDEX_CONSUMER_GROUP_ID,
         enable_auto_commit=False,
         auto_offset_reset="earliest",
+    )
+
+
+def create_sandbox_probe_consumer(settings: Settings) -> AIOKafkaConsumer:
+    logger.info(
+        "creating kafka sandbox-probe consumer bootstrap_servers=%s topic=%s group_id=%s",
+        settings.kafka_bootstrap_servers,
+        settings.kafka_sandbox_probe_request_topic,
+        _SANDBOX_PROBE_CONSUMER_GROUP_ID,
+    )
+    return AIOKafkaConsumer(
+        settings.kafka_sandbox_probe_request_topic,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        group_id=_SANDBOX_PROBE_CONSUMER_GROUP_ID,
+        enable_auto_commit=False,
+        auto_offset_reset="earliest",
+        # 잡 하나가 최대 job_timeout_seconds까지 걸리므로 기본값(5분)이면 처리 중
+        # 리밸런스가 일어난다.
+        max_poll_interval_ms=settings.sandbox_probe_max_poll_interval_ms,
     )
