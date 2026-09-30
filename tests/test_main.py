@@ -410,6 +410,56 @@ async def test_lifespan_leaves_dependency_resolver_none_when_disabled(
         get_settings.cache_clear()
 
 
+async def _captured_pipeline_kwargs(
+    monkeypatch: pytest.MonkeyPatch, **env: str
+) -> dict[str, object]:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    monkeypatch.setattr("app.main.create_producer", lambda settings: FakeStartStop())
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: FakeConsumerSource())
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer", lambda settings: FakeConsumerSource()
+    )
+
+    captured: dict[str, object] = {}
+    original_init = ReviewPipeline.__init__
+
+    def capturing_init(self: ReviewPipeline, *args: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ReviewPipeline, "__init__", capturing_init)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+    finally:
+        get_settings.cache_clear()
+    return captured
+
+
+async def test_lifespan_leaves_diff_line_numbers_off_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = await _captured_pipeline_kwargs(monkeypatch)
+
+    assert captured["annotate_diff_lines"] is False
+
+
+async def test_lifespan_passes_diff_line_numbers_flag_to_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = await _captured_pipeline_kwargs(
+        monkeypatch, REVIEW_DIFF_LINE_NUMBERS_ENABLED="true"
+    )
+
+    assert captured["annotate_diff_lines"] is True
+
+
 class FakeGithubReleaseClient:
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.closed = False

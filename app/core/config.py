@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # 파일은 리뷰하지 못하고 summary에 안내된다. 배치당 LLM 호출 1회라 소요
     # 시간이 비례해 늘어난다.
     review_max_batches: int = 12
+    # 프롬프트의 diff 줄 앞에 새 파일 기준 줄 번호(R<n>)를 붙여, 모델이 `@@` 헤더에서
+    # 줄 번호를 직접 계산하다 틀리는 것을 줄인다(이슈 #122). 기본 False: 로그
+    # `finding lines checked`로 기준 수치를 모은 뒤 .env에서 켜서 전후를 비교한다.
+    review_diff_line_numbers_enabled: bool = False
 
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)
