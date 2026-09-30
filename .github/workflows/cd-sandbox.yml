@@ -1,0 +1,46 @@
+name: CD (sandbox probe)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "deploy/sandbox/**"
+      - ".github/workflows/cd-sandbox.yml"
+
+jobs:
+  deploy:
+    # 저장소 변수 SANDBOX_CD_ENABLED=true를 설정하기 전에는 실행하지 않는다.
+    # (전용 VM과 SANDBOX_SSH_* 시크릿을 준비한 뒤에 켠다: deploy/sandbox/README.md)
+    if: ${{ vars.SANDBOX_CD_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SANDBOX_SSH_HOST }}
+          port: ${{ secrets.SANDBOX_SSH_PORT }}
+          username: ${{ secrets.SANDBOX_SSH_USER }}
+          key: ${{ secrets.SANDBOX_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            if [ ! -d ~/Dovi-ai-server ]; then
+              git clone https://github.com/School-of-Company/Dovi-ai-server.git ~/Dovi-ai-server
+            fi
+            cd ~/Dovi-ai-server
+            git pull origin main
+            # GPU가 없는 VM이라 torch 계열은 설치하지 않는다(RAG는 이 VM에서 쓰지 않으며 지연 import다).
+            ~/.local/bin/uv sync --frozen --no-dev \
+              --no-install-package torch \
+              --no-install-package sentence-transformers \
+              --no-install-package einops
+            docker pull node:24-slim
+            docker pull python:3.13-slim
+            docker pull postgres:17-alpine
+            sudo install -m 644 deploy/sandbox/dovi-sandbox-probe.service /etc/systemd/system/dovi-sandbox-probe.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable dovi-sandbox-probe
+            sudo systemctl restart dovi-sandbox-probe
+            sleep 5
+            systemctl is-active dovi-sandbox-probe
