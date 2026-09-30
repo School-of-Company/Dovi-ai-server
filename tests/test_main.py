@@ -93,6 +93,106 @@ async def test_lifespan_starts_and_cancels_consumer_when_enabled(
         get_settings.cache_clear()
 
 
+async def _run_lifespan_with_flags(
+    monkeypatch: pytest.MonkeyPatch, **flags: str
+) -> dict[str, Any]:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    for key, value in flags.items():
+        monkeypatch.setenv(key, value)
+
+    fake_producer = FakeStartStop()
+    fake_consumer = FakeConsumerSource()
+    fake_comment_answer_consumer = FakeConsumerSource()
+    llm_created: list[object] = []
+
+    class SpyLLMClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            llm_created.append(self)
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: fake_consumer)
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer",
+        lambda settings: fake_comment_answer_consumer,
+    )
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient", SpyLLMClient)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+    finally:
+        get_settings.cache_clear()
+
+    return {
+        "producer": fake_producer,
+        "review": fake_consumer,
+        "comment": fake_comment_answer_consumer,
+        "llm_created": llm_created,
+    }
+
+
+async def test_lifespan_skips_review_and_comment_consumers_when_both_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _run_lifespan_with_flags(
+        monkeypatch,
+        REVIEW_CONSUMER_ENABLED="false",
+        COMMENT_ANSWER_CONSUMER_ENABLED="false",
+    )
+
+    assert result["producer"].started and result["producer"].stopped
+    assert not result["review"].started
+    assert not result["comment"].started
+    assert result["llm_created"] == []
+
+
+async def test_lifespan_starts_only_comment_consumer_when_review_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _run_lifespan_with_flags(
+        monkeypatch, REVIEW_CONSUMER_ENABLED="false"
+    )
+
+    assert not result["review"].started
+    assert result["comment"].started and result["comment"].stopped
+    assert len(result["llm_created"]) == 1
+
+
+async def test_lifespan_starts_only_review_consumer_when_comment_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _run_lifespan_with_flags(
+        monkeypatch, COMMENT_ANSWER_CONSUMER_ENABLED="false"
+    )
+
+    assert result["review"].started and result["review"].stopped
+    assert not result["comment"].started
+    assert len(result["llm_created"]) == 1
+
+
+async def test_rag_is_not_wired_when_review_consumer_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("RAG must not be initialised without the review consumer")
+
+    monkeypatch.setattr("app.rag.embeddings.CodeRankEmbedClient", fail)
+
+    result = await _run_lifespan_with_flags(
+        monkeypatch,
+        REVIEW_CONSUMER_ENABLED="false",
+        COMMENT_ANSWER_CONSUMER_ENABLED="false",
+        RAG_ENABLED="true",
+    )
+
+    assert not result["review"].started
+
+
 class FakeQdrantClient:
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.closed = False

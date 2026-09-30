@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # 기본 False: 테스트/CI에서 TestClient가 앱을 기동해도 실제 Kafka/LLM에
     # 연결을 시도하지 않는다. 운영 배포 시 .env에서 명시적으로 true로 켠다.
     kafka_consumer_enabled: bool = False
+    # kafka_consumer_enabled가 true일 때 컨슈머별로 끌 수 있다. LLM/GPU가 없는 배포
+    # (샌드박스 프로브 VM)가 review/comment-answer 컨슈머 그룹에 합류해 실제
+    # 리뷰를 타임아웃시키는 사고를 막기 위한 스위치라, 기존 배포와의 하위호환을
+    # 위해 기본값은 true다.
+    review_consumer_enabled: bool = True
+    comment_answer_consumer_enabled: bool = True
     # 배포로 종료 신호를 받았을 때, 처리 중인 리뷰를 강제 취소하기 전에 기다려주는
     # 최대 시간. llm_timeout_seconds보다 넉넉해야 정상 완료를 강제 취소로 놓치지 않는다.
     graceful_shutdown_seconds: float = 260.0

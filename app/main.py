@@ -56,6 +56,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
         return
 
+    review_on = settings.review_consumer_enabled
+    comment_on = settings.comment_answer_consumer_enabled
+
     langfuse_client = None
     if settings.langfuse_enabled:
         from langfuse import Langfuse
@@ -66,17 +69,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             host=settings.langfuse_host,
         )
 
-    llm_client = OpenAICompatibleLLMClient(
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-    )
+    # LLM/GPU가 없는 배포(샌드박스 VM)는 review/comment-answer 컨슈머를 꺼서
+    # llama-server·Qdrant 등에 연결을 시도하지 않게 한다.
+    llm_client = None
+    if review_on or comment_on:
+        llm_client = OpenAICompatibleLLMClient(
+            base_url=settings.llm_base_url,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
 
     qdrant_client = None
     npm_registry_client = None
     retriever = None
     api_spec_retriever = None
-    if settings.rag_enabled:
+    rag_on = review_on and settings.rag_enabled
+    if rag_on:
         # qdrant-client는 numpy를 끌어오는데, 이를 지원 안 하는 CPU에서는 import만
         # 해도 죽는다(RAG를 안 켜는 배포에까지 그 위험을 지우지 않도록 지연 import).
         from qdrant_client import QdrantClient
@@ -109,21 +117,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_client = create_redis_client(settings)
 
     notion_link_store = None
-    if settings.notion_sync_enabled:
+    if review_on and settings.notion_sync_enabled:
         from app.context.api_spec_link_store import RedisNotionLinkStore
 
         # redis.asyncio.Redis의 실제 타입 스텁이 RedisLike보다 훨씬 넓어 구조적으로
         # 완전히 일치하지 않지만, set/get/keys를 문자열 인자로만 호출하므로 런타임에는 호환된다.
         notion_link_store = RedisNotionLinkStore(redis_client)  # type: ignore[arg-type]
 
-    if settings.dependency_check_enabled or settings.official_docs_workflow_enabled:
+    if review_on and (
+        settings.dependency_check_enabled or settings.official_docs_workflow_enabled
+    ):
         from app.context.npm_registry_client import NpmRegistryClient
 
         npm_registry_client = NpmRegistryClient()
 
     maven_central_client = None
     dependency_resolver = None
-    if settings.dependency_check_enabled:
+    if review_on and settings.dependency_check_enabled:
         from app.context.dependency_resolver import DependencyResolver
         from app.context.maven_central_client import MavenCentralClient
         from app.context.npm_deprecation_cache import RedisNpmDeprecationCache
@@ -149,7 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     github_release_client = None
     official_docs_workflow = None
-    if settings.official_docs_workflow_enabled:
+    if review_on and settings.official_docs_workflow_enabled:
         from app.context.github_release_client import GithubReleaseClient
         from app.context.official_docs_workflow import OfficialDocsWorkflow
         from app.context.release_notes_cache import RedisReleaseNotesCache
@@ -163,7 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     evaluation_repository = None
     evaluation_engine = None
-    if settings.evaluation_enabled:
+    if review_on and settings.evaluation_enabled:
         from app.evaluation.db import create_engine, create_session_factory
         from app.evaluation.repository import SqlAlchemyEvaluationRepository
 
@@ -182,40 +192,52 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with evaluation_engine.connect() as conn:
             await conn.execute(select(ReviewJobRow.review_job_id).limit(1))
 
-    pipeline = ReviewPipeline(
-        llm_client,
-        model_version=settings.llm_model,
-        prompt_version="v1",
-        llm_max_context=settings.llm_max_context,
-        max_tokens=settings.llm_max_tokens,
-        verify_max_tokens=settings.llm_verify_max_tokens,
-        truncation_retry_max_findings=settings.llm_truncation_retry_max_findings,
-        max_review_batches=settings.review_max_batches,
-        retriever=retriever,
-        api_spec_retriever=api_spec_retriever,
-        notion_link_store=notion_link_store,
-        dependency_resolver=dependency_resolver,
-        official_docs_workflow=official_docs_workflow,
-    )
+    pipeline = None
+    if review_on:
+        assert llm_client is not None
+        pipeline = ReviewPipeline(
+            llm_client,
+            model_version=settings.llm_model,
+            prompt_version="v1",
+            llm_max_context=settings.llm_max_context,
+            max_tokens=settings.llm_max_tokens,
+            verify_max_tokens=settings.llm_verify_max_tokens,
+            truncation_retry_max_findings=settings.llm_truncation_retry_max_findings,
+            max_review_batches=settings.review_max_batches,
+            retriever=retriever,
+            api_spec_retriever=api_spec_retriever,
+            notion_link_store=notion_link_store,
+            dependency_resolver=dependency_resolver,
+            official_docs_workflow=official_docs_workflow,
+        )
 
-    comment_answer_pipeline = CommentAnswerPipeline(
-        llm_client, llm_max_context=settings.llm_max_context
-    )
+    comment_answer_pipeline = None
+    if comment_on:
+        assert llm_client is not None
+        comment_answer_pipeline = CommentAnswerPipeline(
+            llm_client, llm_max_context=settings.llm_max_context
+        )
 
     kafka_producer = create_producer(settings)
-    kafka_consumer = create_consumer(settings)
-    comment_answer_kafka_consumer = create_comment_answer_consumer(settings)
     await kafka_producer.start()
-    await kafka_consumer.start()
-    await comment_answer_kafka_consumer.start()
+
+    kafka_consumer = None
+    if review_on:
+        kafka_consumer = create_consumer(settings)
+        await kafka_consumer.start()
+
+    comment_answer_kafka_consumer = None
+    if comment_on:
+        comment_answer_kafka_consumer = create_comment_answer_consumer(settings)
+        await comment_answer_kafka_consumer.start()
 
     review_feedback_kafka_consumer = None
-    if settings.evaluation_enabled:
+    if evaluation_repository is not None:
         review_feedback_kafka_consumer = create_review_feedback_consumer(settings)
         await review_feedback_kafka_consumer.start()
 
     repo_index_kafka_consumer = None
-    if settings.rag_enabled:
+    if rag_on:
         repo_index_kafka_consumer = create_repo_index_consumer(settings)
         await repo_index_kafka_consumer.start()
 
@@ -226,39 +248,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings, redis_client  # type: ignore[arg-type]
     )
 
-    event_producer = ReviewEventProducer(
-        kafka_producer,
-        completed_topic=settings.kafka_review_completed_topic,
-        failed_topic=settings.kafka_review_failed_topic,
-    )
-    comment_answer_event_producer = CommentAnswerEventProducer(
-        kafka_producer,
-        completed_topic=settings.kafka_comment_answer_completed_topic,
-        failed_topic=settings.kafka_comment_answer_failed_topic,
-    )
-    review_consumer = ReviewRequestConsumer(
-        kafka_consumer,
-        pipeline,
-        event_producer,
-        dedup_store,
-        evaluation_repository=evaluation_repository,
-    )
-    comment_answer_consumer = CommentAnswerConsumer(
-        comment_answer_kafka_consumer,
-        comment_answer_pipeline,
-        comment_answer_event_producer,
-        comment_answer_dedup_store,
-    )
     shutdown_event = asyncio.Event()
-    consumer_task = asyncio.create_task(
-        _run_consumer_forever(review_consumer, shutdown_event, name="review")
-    )
-    comment_answer_task = asyncio.create_task(
-        _run_consumer_forever(
-            comment_answer_consumer, shutdown_event, name="comment-answer"
+    tasks: list[asyncio.Task[None]] = []
+    if kafka_consumer is not None:
+        assert pipeline is not None
+        event_producer = ReviewEventProducer(
+            kafka_producer,
+            completed_topic=settings.kafka_review_completed_topic,
+            failed_topic=settings.kafka_review_failed_topic,
         )
-    )
-    tasks: list[asyncio.Task[None]] = [consumer_task, comment_answer_task]
+        review_consumer = ReviewRequestConsumer(
+            kafka_consumer,
+            pipeline,
+            event_producer,
+            dedup_store,
+            evaluation_repository=evaluation_repository,
+        )
+        tasks.append(
+            asyncio.create_task(
+                _run_consumer_forever(review_consumer, shutdown_event, name="review")
+            )
+        )
+    if comment_answer_kafka_consumer is not None:
+        assert comment_answer_pipeline is not None
+        comment_answer_event_producer = CommentAnswerEventProducer(
+            kafka_producer,
+            completed_topic=settings.kafka_comment_answer_completed_topic,
+            failed_topic=settings.kafka_comment_answer_failed_topic,
+        )
+        comment_answer_consumer = CommentAnswerConsumer(
+            comment_answer_kafka_consumer,
+            comment_answer_pipeline,
+            comment_answer_event_producer,
+            comment_answer_dedup_store,
+        )
+        tasks.append(
+            asyncio.create_task(
+                _run_consumer_forever(
+                    comment_answer_consumer, shutdown_event, name="comment-answer"
+                )
+            )
+        )
     if review_feedback_kafka_consumer is not None:
         from app.evaluation.feedback_consumer import ReviewFeedbackConsumer
 
@@ -302,15 +332,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await task
             except asyncio.CancelledError:
                 pass
-        await kafka_consumer.stop()
-        await comment_answer_kafka_consumer.stop()
+        if kafka_consumer is not None:
+            await kafka_consumer.stop()
+        if comment_answer_kafka_consumer is not None:
+            await comment_answer_kafka_consumer.stop()
         if review_feedback_kafka_consumer is not None:
             await review_feedback_kafka_consumer.stop()
         if repo_index_kafka_consumer is not None:
             await repo_index_kafka_consumer.stop()
         await kafka_producer.stop()
         await redis_client.aclose()
-        await llm_client.aclose()
+        if llm_client is not None:
+            await llm_client.aclose()
         if qdrant_client is not None:
             qdrant_client.close()
         if npm_registry_client is not None:
