@@ -17,6 +17,7 @@ from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze
+from app.review.diff_lines import annotate_hunk, classify_finding_lines
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
     ChangedFile,
@@ -304,6 +305,17 @@ _SYSTEM_PROMPT = (
     "the diff hunk, not from either of these extra sections."
 )
 
+# 플래그(review_diff_line_numbers_enabled)가 켜졌을 때만 시스템 프롬프트에 이어 붙인다.
+_LINE_NUMBER_NOTE = (
+    "\n\nEach added ('+') and unchanged (' ') diff line is prefixed with "
+    "`R<n>`, its line number in the new version of the file; deleted ('-') "
+    "lines have no number. For every item in `reviews`, set `line` to the "
+    "`R` number of the line the finding is about — copy it, never count "
+    "lines yourself — and never point at a deleted line. The `R<n>` prefix "
+    "is only a marker: leave it out of `evidence`, which must stay the exact "
+    "diff line as it appears after the marker."
+)
+
 _VERIFY_SYSTEM_PROMPT = (
     "You previously reviewed a PR diff and produced the numbered code review "
     "findings below. Verify each one skeptically against the same diff — do "
@@ -426,6 +438,7 @@ class ReviewPipeline:
         verify_max_tokens: int = 800,
         truncation_retry_max_findings: int = 5,
         max_review_batches: int = _MAX_REVIEW_BATCHES,
+        annotate_diff_lines: bool = False,
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
@@ -440,6 +453,7 @@ class ReviewPipeline:
         self._verify_max_tokens = verify_max_tokens
         self._truncation_retry_max_findings = truncation_retry_max_findings
         self._max_review_batches = max_review_batches
+        self._annotate_diff_lines = annotate_diff_lines
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
@@ -581,12 +595,17 @@ class ReviewPipeline:
         if notes:
             combined_summary += "\n\n" + "\n".join(f"({n})" for n in notes)
 
+        # dependency_findings는 lockfile patch 기준으로 줄이 이미 정확해 통계를 왜곡하므로
+        # 모델이 만든 finding만 측정한다.
+        self._log_finding_lines("llm", event, all_llm_reviews)
+
         all_reviews = list(all_llm_reviews)
         all_reviews.extend(dependency_findings)
 
         reviews = filter_reviews(all_reviews)
         if reviews:
             reviews = await self._verify_across_batches(event, reviews, review_to_messages)
+        self._log_finding_lines("final", event, reviews)
         summary = self._build_summary(combined_summary, all_reviews, all_llm_reviews)
         logger.info(
             "review completed reviewJobId=%s reviewCount=%d batches=%d",
@@ -1426,7 +1445,7 @@ class ReviewPipeline:
         user += official_docs_context
         user += extra_user_suffix
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt()},
             {"role": "user", "content": user},
         ]
         sections = {
@@ -1438,10 +1457,34 @@ class ReviewPipeline:
         }
         return messages, sections
 
+    def _system_prompt(self) -> str:
+        if self._annotate_diff_lines:
+            return _SYSTEM_PROMPT + _LINE_NUMBER_NOTE
+        return _SYSTEM_PROMPT
+
+    def _log_finding_lines(
+        self, stage: str, event: ReviewRequestedEvent, reviews: list[ReviewComment]
+    ) -> None:
+        counts = classify_finding_lines(reviews, event.changed_files)
+        logger.info(
+            "finding lines checked stage=%s reviewJobId=%s annotated=%s total=%d "
+            "ok=%d line_not_in_diff=%d file_not_in_diff=%d",
+            stage,
+            event.review_job_id,
+            self._annotate_diff_lines,
+            len(reviews),
+            counts["ok"],
+            counts["line_not_in_diff"],
+            counts["file_not_in_diff"],
+        )
+
     def _render_target(
         self, target: ReviewTarget, related: list[ChunkSearchResult]
     ) -> str:
-        block = f"# {target.file_path} ({target.status})\n" + "\n".join(target.hunks)
+        hunks = target.hunks
+        if self._annotate_diff_lines:
+            hunks = [annotate_hunk(h) for h in hunks]
+        block = f"# {target.file_path} ({target.status})\n" + "\n".join(hunks)
         if target.context_chunks:
             context_section = "\n\n".join(target.context_chunks)
             if len(context_section) > _MAX_SAME_FILE_CONTEXT_CHARS:
