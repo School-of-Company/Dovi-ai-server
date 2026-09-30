@@ -34,7 +34,7 @@ Dovi 리뷰 파이프라인에, PR 코드를 실제로 빌드/기동해서 정�
 | Expo-Form-Server | `8a4f5f9a2dc7` | PR #12 버그 있음 | 생명주기 프로브 | `found_issue` |
 | Expo-Form-Server | `482db26e3993` | PR #12 수정 | 생명주기 프로브 | `passed` |
 
-구현체는 이 4개 상태를 실제로 재생하는 통합 테스트(예: `tests/test_sandbox_probe_fixtures.py`)를 CI에 포함해야 한다.
+구현체는 이 4개 상태를 실제로 재생하는 통합 테스트(예: `tests/test_sandbox_probe_fixtures.py`, `@pytest.mark.fixture_replay`)를 갖춰야 한다. 실제 clone/Docker 빌드로 몇 분씩 걸리므로 기본 CI에서는 제외하고, 별도 워크플로(`workflow_dispatch` + `app/sandbox_probe/**` 변경 시)에서 돌린다. 이 워크플로의 통과가 구현 merge 조건이다.
 
 ## 단계 구분
 
@@ -49,6 +49,16 @@ Dovi 리뷰 파이프라인에, PR 코드를 실제로 빌드/기동해서 정�
 - GitHub webhook payload DTO에 `pull_request.head.repo.{id,full_name}` 추가 + fork 판별 헬퍼 — 현재 DTO는 `head.sha`만 파싱해서 fork PR을 구분할 방법이 없다.
 - GitHub App 권한에 issue 코멘트 게시(`issues: write`)가 포함되는지 확인 — 현재 Dovi-github-app은 `issues.createComment`를 한 번도 호출한 적이 없어 권한이 실제로 있는지 미검증.
 - `app/core/config.py`에 컨슈머별 개별 enable 플래그 추가(`review_consumer_enabled`, `comment_answer_consumer_enabled`, `sandbox_probe_consumer_enabled`) — 아래 "배포/컨슈머 격리" 참고.
+
+### 토큰 발급 계약 (v3.1 확정)
+
+워커는 Python 프로세스이고 GitHub App private key는 Dovi-github-app에만 둔다(신뢰할 수 없는 코드를 실행하는 VM에 키를 두지 않는다). 따라서 위 `installation-token` 확장에 더해 github-app에 내부 API를 둔다.
+
+- 호출: `POST {GITHUB_APP_INTERNAL_URL}/internal/sandbox-probe/token`
+- 인증: 헤더 `X-Dovi-Internal-Secret` (양쪽이 공유하는 시크릿)
+- 요청: `{installationId, repositoryId}`
+- 응답: `{token, expiresAt}` — `contents:read` 권한에 `repositories=[repositoryId]`로 스코프를 좁힌 토큰
+- 워커는 잡을 실제로 시작하기 직전에 호출하고, 토큰은 로그·이벤트·컨테이너 어디에도 남기지 않는다.
 
 ## 아키텍처 개요
 
@@ -78,7 +88,7 @@ GitHub PR 이벤트
 전용 VM 1대 (프로덕션 GPU 박스와 분리):
 
 - **스펙**: 4 vCPU / 15Gi RAM / 58G 디스크, GPU 없음
-- **동시 처리**: 최대 4개 잡. 기존 컨슈머들은 전부 엄격히 순차 처리(`async for` 안에서 처리 후 커밋)이므로, 신규 토픽(`pr.sandbox.probe.requested`)은 **파티션 4개 이상**으로 생성해야 동시성 목표가 성립한다. 멀티 인스턴스 또는 단일 프로세스 내 세마포어 중 구현 방식은 구현 단계에서 정한다.
+- **동시 처리**: 최대 4개 잡. 기존 컨슈머들은 전부 엄격히 순차 처리(`async for` 안에서 처리 후 커밋)이므로, 신규 토픽(`pr.sandbox.probe.requested`)은 **파티션 4개 이상**으로 생성해야 동시성 목표가 성립한다. 구현은 한 프로세스 안에서 같은 컨슈머 그룹의 `AIOKafkaConsumer`를 `sandbox_probe_concurrency`(기본 4)개 띄우는 방식으로 확정한다 — 컨슈머마다 기존 순차 처리·수동 커밋 규약이 그대로 유지되고, 세마포어처럼 커밋 순서를 별도로 관리할 필요가 없다.
 - **LLM 추론**: 이 VM에서 전혀 없다(Phase 1). Phase 2 대비 llama-server 네트워크 경로는 나중에 별도로 검토한다(프로덕션 박스는 현재 방화벽 없이 `127.0.0.1` 바인딩 + SSH 터널이 실제 보안 모델이므로, 이 기능과 무관하게 그 관례에 맞춰 처리해야 한다).
 - **분리 이유**: 신뢰할 수 없는 PR 코드를 실제로 빌드/실행하므로, 프로덕션 GPU 박스와 물리적으로 분리해 자원 고갈이 전이되지 않게 한다.
 - **접속 정보**: 로컬 메모리에만 보관, 스펙 문서나 git에는 포함하지 않는다.
@@ -101,7 +111,7 @@ GitHub PR 이벤트
 ## 클론
 
 - **ref**: `head_sha` 고정 checkout. 브랜치 tip을 clone하면 이벤트 발행과 clone 사이 새 커밋이 푸시됐을 때 다른 코드를 검증하고 결과를 옛 `head_sha`에 귀속시키는 TOCTOU가 생긴다.
-- **토큰 처리**: Kafka 이벤트에는 토큰을 싣지 않고 `repoFullName`(+ installation 조회에 필요한 최소 정보)만 싣는다. 워커가 잡을 **실제로 시작하기 직전에** 확장된 `installation-token` 모듈을 호출해 `contents:read` 스코프 토큰을 그 자리에서 받는다 — 대기열에서 기다리는 동안 토큰을 들고 있지 않으므로 만료 문제가 없다. 컨테이너 안에서 `git clone https://x-access-token:TOKEN@...`을 실행하면 토큰이 `.git/config`에 평문으로 남으므로, **워커가 컨테이너 밖에서 clone**하고 `.git/config`에서 인증 정보를 제거한 워킹트리만 볼륨 마운트한다.
+- **토큰 처리**: Kafka 이벤트에는 토큰을 싣지 않고 `repoFullName`과 `installationId`만 싣는다. 워커가 잡을 **실제로 시작하기 직전에** 확장된 `installation-token` 모듈을 호출해 `contents:read` 스코프 토큰을 그 자리에서 받는다 — 대기열에서 기다리는 동안 토큰을 들고 있지 않으므로 만료 문제가 없다. 컨테이너 안에서 `git clone https://x-access-token:TOKEN@...`을 실행하면 토큰이 `.git/config`에 평문으로 남으므로, **워커가 컨테이너 밖에서 clone**하고 `.git/config`에서 인증 정보를 제거한 워킹트리만 볼륨 마운트한다.
 
 ## 오프라인 빌드 — 2단계 컨테이너
 
@@ -110,7 +120,9 @@ GitHub PR 이벤트
 1. **install 단계 컨테이너**: 네트워크는 열려 있되 패키지 레지스트리로만 egress 허용, 시크릿 없음, `--cap-drop=ALL`. 락파일 종류(`pnpm-lock.yaml`/`package-lock.json`/`yarn.lock`)로 분기해서 `install --frozen-lockfile` 실행(미지원 락파일이면 이 잡은 `inconclusive`). 결과 `node_modules`를 볼륨으로 스냅샷.
 2. **프로브 컨테이너**: 그 볼륨을 마운트하고 **외부 네트워크 완전 차단**(같은 잡 네트워크 안의 사이드카/mock 서버만 접근 가능). 여기서 빌드+프로브 실행.
 
-"완전 차단"은 install 단계에 한해 레지스트리 접근만 허용하는 걸로 완화된다 — 임의 코드가 실제로 도는 지점(빌드/실행)은 여전히 완전 격리라는 트레이드오프를 문서화해둔다. egress 화이트리스트를 어떻게 강제할지(DNS/IP 필터 vs 사내 레지스트리 프록시)는 구현 단계에서 정한다.
+"완전 차단"은 install 단계에 한해 레지스트리 접근만 허용하는 걸로 완화된다 — 임의 코드가 실제로 도는 지점(빌드/실행)은 여전히 완전 격리라는 트레이드오프를 문서화해둔다.
+
+**egress 강제 방식 (확정)**: 잡 네트워크를 `docker network create --internal`로 만들어 라우트를 없애고, 레지스트리 도메인 allowlist를 건 forward proxy 컨테이너(tinyproxy)만 외부 네트워크에도 붙인다. install 컨테이너는 `npm_config_proxy`/`https_proxy`로 이 프록시만 통해 나간다. DNS/IP 필터는 레지스트리 IP가 바뀔 때 깨지므로 쓰지 않는다. 프록시 컨테이너는 install 단계가 끝나면 내리고, 프로브 컨테이너 단계에는 존재하지 않는다.
 
 ## 격리 단위 및 컨테이너 격리 세부사항
 
@@ -219,6 +231,7 @@ VM 전체 예산(4 vCPU / 15Gi RAM)에서 호스트 OS/Docker 데몬/워커 프�
 ```
 reviewJobId: str        # Kafka key로도 사용
 repositoryId: int
+installationId: int     # 토큰 발급 API 호출용
 repoFullName: str       # owner/repo — clone에 필수. "한쪽만 쓰는 필드는 이벤트에 안 싣는다"는
                          # 기존 컨벤션의 의도적 예외(ai-server가 실제로 clone에 소비) —
                          # docs/kafka-event-schema.md 갱신 시 이 예외를 명시한다.
@@ -274,13 +287,12 @@ evidence: str             # 최대 4KB
 
 ## 테스트 전략
 
-- "수용 기준" 4개 fixture 재생을 통합 테스트로 만들어 CI에 포함.
+- "수용 기준" 4개 fixture 재생을 통합 테스트로 만들어 별도 워크플로에서 실행(기본 CI 제외).
 - Docker 오케스트레이션 워커는 Docker 클라이언트를 추상화하고 테스트에서는 fake/stub으로 교체.
 - 프로브 판정 로직(초기화 순서 파싱, positive control 체크, 상태 전이)은 Docker 실행과 분리된 순수 함수로 만들어 단위 테스트 가능하게 한다.
 
 ## 열린 리스크 / 후속 과제
 
-- install 단계의 "레지스트리로만 egress 허용"을 실제로 어떻게 강제할지(DNS/IP 화이트리스트 vs 사내 프록시)는 구현 단계에서 정한다.
 - GitHub App의 `issues: write` 권한 보유 여부 확인이 선행돼야 한다(위 "선행 작업" 참고).
 - 초기화 순서 프로브가 파일 수가 많은 레포에서 느릴 수 있다 — 최적화는 실제 운영 데이터를 보고 판단.
 - 향후 Java/Gradle 어댑터 추가 시 VM 사이징 재검토 필요.
