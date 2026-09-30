@@ -89,8 +89,7 @@ def _probe_env(example_text: str, source: str = "") -> dict[str, str]:
     return build_probe_env(
         classify_env(names),
         example,
-        sidecar_host="db",
-        sidecar_port=5433,
+        resolve_sidecar=lambda name: ("cache", 6380) if name.startswith("REDIS") else ("db", 5433),
         mock_url="http://mock:9000",
         make_secret=lambda: "s" * 64,
     )
@@ -129,8 +128,8 @@ def test_build_probe_env_does_not_invent_values_for_unknown_general_names() -> N
 def test_build_probe_env_uses_sidecar_for_host_and_port_style_database_vars() -> None:
     env = _probe_env("REDIS_HOST=localhost\nREDIS_PORT=6379\nPOSTGRES_USER=app\n")
 
-    assert env["REDIS_HOST"] == "db"
-    assert env["REDIS_PORT"] == "5433"
+    assert env["REDIS_HOST"] == "cache"
+    assert env["REDIS_PORT"] == "6380"
     assert env["POSTGRES_USER"] == "app"
 
 
@@ -154,6 +153,26 @@ def test_detect_toolchain_falls_back_to_lockfile_and_ci_workflow() -> None:
     result = detect_toolchain(_package_json(), {"yarn.lock"}, [workflow])
 
     assert result == Toolchain("yarn", "22", None)
+
+
+def test_detect_toolchain_reads_nvmrc_before_ci_and_default() -> None:
+    result = detect_toolchain(
+        _package_json(),
+        {"pnpm-lock.yaml"},
+        ["node-version: 18"],
+        node_version_files=["v20.11.0\n"],
+        default_node_major="24",
+    )
+
+    assert result == Toolchain("pnpm", "20", None)
+
+
+def test_detect_toolchain_uses_configured_default_node_as_last_resort() -> None:
+    result = detect_toolchain(
+        _package_json(), {"pnpm-lock.yaml"}, [], default_node_major="24"
+    )
+
+    assert result == Toolchain("pnpm", "24", None)
 
 
 def test_detect_toolchain_lockfile_priority_is_pnpm_yarn_npm() -> None:

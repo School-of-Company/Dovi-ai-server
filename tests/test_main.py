@@ -193,6 +193,59 @@ async def test_rag_is_not_wired_when_review_consumer_disabled(
     assert not result["review"].started
 
 
+async def test_lifespan_starts_sandbox_probe_consumers_and_reaps_orphans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("REVIEW_CONSUMER_ENABLED", "false")
+    monkeypatch.setenv("COMMENT_ANSWER_CONSUMER_ENABLED", "false")
+    monkeypatch.setenv("SANDBOX_PROBE_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("SANDBOX_PROBE_CONCURRENCY", "2")
+    monkeypatch.setenv("GITHUB_APP_INTERNAL_URL", "http://github-app.internal")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+
+    fake_producer = FakeStartStop()
+    sandbox_consumers = [FakeConsumerSource(), FakeConsumerSource()]
+    reaped: list[bool] = []
+
+    class FakeDockerRunner:
+        async def reap_orphans(self) -> None:
+            reaped.append(True)
+
+    monkeypatch.setattr("app.main.create_producer", lambda settings: fake_producer)
+    monkeypatch.setattr(
+        "app.main.create_sandbox_probe_consumer",
+        lambda settings: sandbox_consumers.pop(0),
+    )
+    monkeypatch.setattr("app.sandbox_probe.docker.SubprocessDockerRunner", FakeDockerRunner)
+    started: list[FakeConsumerSource] = list(sandbox_consumers)
+
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+            assert reaped == [True]
+            assert all(consumer.started for consumer in started)
+
+        assert all(consumer.stopped for consumer in started)
+        assert fake_producer.stopped
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_lifespan_does_not_touch_docker_when_sandbox_probe_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("sandbox probe must stay off by default")
+
+    monkeypatch.setattr("app.main.create_sandbox_probe_consumer", fail)
+
+    result = await _run_lifespan_with_flags(monkeypatch)
+
+    assert result["producer"].started
+
+
 class FakeQdrantClient:
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.closed = False

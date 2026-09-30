@@ -2,7 +2,8 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 from fastapi import FastAPI
 
@@ -17,6 +18,7 @@ from app.kafka.client import (
     create_producer,
     create_repo_index_consumer,
     create_review_feedback_consumer,
+    create_sandbox_probe_consumer,
 )
 from app.kafka.consumer import ReviewRequestConsumer
 from app.kafka.producer import CommentAnswerEventProducer, ReviewEventProducer
@@ -313,6 +315,61 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         tasks.append(repo_index_task)
 
+    sandbox_probe_kafka_consumers: list[Any] = []
+    sandbox_token_client = None
+    if settings.sandbox_probe_consumer_enabled:
+        from app.kafka.producer import SandboxProbeEventProducer
+        from app.review.dedup import RedisDedupStore
+        from app.sandbox_probe.consumer import SandboxProbeConsumer
+        from app.sandbox_probe.docker import SubprocessDockerRunner
+        from app.sandbox_probe.runner import SandboxJobRunner
+        from app.sandbox_probe.token_client import GithubAppTokenClient
+
+        sandbox_token_client = GithubAppTokenClient(
+            settings.github_app_internal_url, settings.github_app_internal_secret
+        )
+        docker_runner = SubprocessDockerRunner()
+        # 이전 프로세스가 배포 도중 죽으며 남긴 잡 리소스를 먼저 수거한다.
+        await docker_runner.reap_orphans()
+        sandbox_runner = SandboxJobRunner(
+            docker_runner,
+            sandbox_token_client,
+            workdir=Path(settings.sandbox_probe_workdir),
+            job_timeout_seconds=settings.sandbox_probe_job_timeout_seconds,
+            min_free_disk_gb=settings.sandbox_probe_min_free_disk_gb,
+            default_node_major=settings.sandbox_probe_default_node_major,
+        )
+        sandbox_probe_dedup = RedisDedupStore(
+            redis_client,  # type: ignore[arg-type]
+            key_prefix="ai-review:sandbox-probe-dedup:",
+            ttl_seconds=settings.sandbox_probe_dedup_ttl_seconds,
+        )
+        sandbox_probe_producer = SandboxProbeEventProducer(
+            kafka_producer,
+            completed_topic=settings.kafka_sandbox_probe_completed_topic,
+        )
+        # 기존 컨슈머는 엄격히 순차 처리라, 동시성은 같은 그룹의 컨슈머를 여러 개
+        # 띄워서 얻는다(토픽 파티션 수 이상으로 늘려도 이득이 없다).
+        for index in range(settings.sandbox_probe_concurrency):
+            sandbox_kafka_consumer = create_sandbox_probe_consumer(settings)
+            await sandbox_kafka_consumer.start()
+            sandbox_probe_kafka_consumers.append(sandbox_kafka_consumer)
+            sandbox_consumer = SandboxProbeConsumer(
+                sandbox_kafka_consumer,
+                sandbox_runner,
+                sandbox_probe_producer,
+                sandbox_probe_dedup,
+                redis_client,
+                max_attempts=settings.sandbox_probe_max_attempts,
+            )
+            tasks.append(
+                asyncio.create_task(
+                    _run_consumer_forever(
+                        sandbox_consumer, shutdown_event, name=f"sandbox-probe-{index}"
+                    )
+                )
+            )
+
     try:
         yield
     finally:
@@ -340,6 +397,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await review_feedback_kafka_consumer.stop()
         if repo_index_kafka_consumer is not None:
             await repo_index_kafka_consumer.stop()
+        for sandbox_kafka_consumer in sandbox_probe_kafka_consumers:
+            await sandbox_kafka_consumer.stop()
+        if sandbox_token_client is not None:
+            await sandbox_token_client.aclose()
         await kafka_producer.stop()
         await redis_client.aclose()
         if llm_client is not None:
