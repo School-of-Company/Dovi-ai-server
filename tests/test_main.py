@@ -460,6 +460,15 @@ async def test_lifespan_passes_diff_line_numbers_flag_to_pipeline(
     assert captured["annotate_diff_lines"] is True
 
 
+async def test_lifespan_passes_the_llm_client_as_summary_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = await _captured_pipeline_kwargs(monkeypatch)
+
+    assert captured["summary_llm"] is not None
+    assert hasattr(captured["summary_llm"], "generate_text")
+
+
 class FakeGithubReleaseClient:
     def __init__(self, *args: object, **kwargs: object) -> None:
         self.closed = False
