@@ -61,3 +61,23 @@ class ReviewFeedbackRow(Base):
     reflected: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReviewLineCheckRow(Base):
+    """finding 줄 번호가 diff 안에 있었는지 측정한 결과(이슈 #122).
+
+    review_jobs를 참조하지 않는다 — 파이프라인 실행 중에 기록되고, review_jobs 행은
+    그 뒤 consumer가 결과를 저장할 때 만들어지므로 FK를 걸면 항상 위반된다.
+    """
+
+    __tablename__ = "review_line_checks"
+
+    review_job_id: Mapped[str] = mapped_column(String, primary_key=True)
+    annotated: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    llm_ok: Mapped[int] = mapped_column(Integer, nullable=False)
+    llm_line_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
+    llm_file_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
+    final_ok: Mapped[int] = mapped_column(Integer, nullable=False)
+    final_line_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
+    final_file_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -208,6 +208,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             max_review_batches=settings.review_max_batches,
             annotate_diff_lines=settings.review_diff_line_numbers_enabled,
             summary_llm=llm_client,
+            line_check_sink=(
+                evaluation_repository.save_line_check
+                if evaluation_repository is not None
+                else None
+            ),
             retriever=retriever,
             api_spec_retriever=api_spec_retriever,
             notion_link_store=notion_link_store,
