@@ -3,6 +3,7 @@ import functools
 import logging
 import math
 import re
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from langfuse import propagate_attributes
@@ -167,14 +168,35 @@ def _shrink_to_char_limit(text: str, target_chars: int) -> str:
     return text[:cut] + trunc_msg
 
 
+@dataclass
+class _PromptReport:
+    """프롬프트 조립 중 diff가 잘리거나 빠진 파일 — 사용자에게 안내하기 위해 호출자에 전달한다."""
+
+    dropped_files: list[str] = field(default_factory=list)
+    truncated_files: list[str] = field(default_factory=list)
+
+
 def _truncate_diff_blocks(
     blocks: list[tuple[str, str]],
     *,
     max_file_chars: int = _MAX_DIFF_FILE_CHARS,
     max_total_chars: int = _MAX_DIFF_TOTAL_CHARS,
 ) -> str:
+    return _truncate_diff_blocks_detailed(
+        blocks, max_file_chars=max_file_chars, max_total_chars=max_total_chars
+    )[0]
+
+
+def _truncate_diff_blocks_detailed(
+    blocks: list[tuple[str, str]],
+    *,
+    max_file_chars: int = _MAX_DIFF_FILE_CHARS,
+    max_total_chars: int = _MAX_DIFF_TOTAL_CHARS,
+) -> tuple[str, list[str], list[str]]:
+    """(diff 텍스트, 완전히 빠진 파일들, 일부만 잘린 파일들)을 반환한다."""
     truncated: list[str] = []
     dropped_paths: list[str] = []
+    truncated_paths: list[str] = []
     total = 0
     for i, (file_path, block) in enumerate(blocks):
         remaining = max_total_chars - total
@@ -192,6 +214,13 @@ def _truncate_diff_blocks(
                 break
             content_limit = limit - len(trunc_msg)
             cut = _cut_at_line_boundary(block, content_limit)
+            header_end = block.find("\n")
+            if header_end != -1 and cut <= header_end:
+                # 파일 헤더(`# path (status)`)만 남고 diff가 한 줄도 안 보이면 사실상
+                # 못 본 파일이다 — "일부만 리뷰됨"이 아니라 "생략됨"으로 다룬다.
+                logger.warning("diff truncated: dropping %d remaining file(s)", len(blocks) - i)
+                dropped_paths.extend(path for path, _ in blocks[i:])
+                break
             # limit이 max_file_chars가 아니라 remaining(공유 예산 소진)에 걸린
             # 경우도 있으므로, 실제로 적용된 한도가 뭔지 로그에 정확히 남긴다.
             if limit == max_file_chars:
@@ -201,6 +230,7 @@ def _truncate_diff_blocks(
                     "diff truncated: shared budget exhausted (%d chars remaining)", remaining
                 )
             block = block[:cut] + trunc_msg
+            truncated_paths.append(file_path)
 
         truncated.append(block)
         total += len(block)
@@ -216,7 +246,7 @@ def _truncate_diff_blocks(
             f"\n\n(크기 제한으로 생략된 파일 {len(dropped_paths)}개: {file_list} — "
             "내용은 볼 수 없으나 변경이 있었다는 사실은 알아둘 것)"
         )
-    return diff
+    return diff, dropped_paths, truncated_paths
 
 
 _SYSTEM_PROMPT = (
@@ -544,6 +574,7 @@ class ReviewPipeline:
 
         # 배치별 결과: (LLM 출력, 실제로 쓰인 messages, 그 배치가 다룬 파일들).
         successful: list[tuple[ReviewModelOutput, list[ChatMessage], list[str]]] = []
+        partial_files: list[str] = []
         # parse_error/server_error는 배치마다 1회 재시도 후 실패 처리. timeout은
         # 즉시 실패(재시도가 SLA를 더 악화시키므로 재시도하지 않는다) — 오늘과
         # 동일한 규칙을 _generate_batch()가 배치 하나마다 적용한다.
@@ -563,6 +594,7 @@ class ReviewPipeline:
         ):
             for batch_index, batch_targets in enumerate(target_batches):
                 include_shared = batch_index == 0
+                report = _PromptReport()
                 batch_messages = await self._assemble_within_budget(
                     event,
                     batch_targets,
@@ -570,6 +602,7 @@ class ReviewPipeline:
                     api_spec_context,
                     official_docs_context,
                     include_shared=include_shared,
+                    report=report,
                 )
                 if batch_messages is None:
                     logger.warning(
@@ -598,6 +631,10 @@ class ReviewPipeline:
                 successful.append(
                     (output, used_messages, [t.file_path for t in batch_targets])
                 )
+                # 프롬프트 조립에서 diff가 빠지거나 잘린 파일은 모델이 본 적이 없으므로
+                # 모델 문장에 기대지 않고 우리가 직접 사용자에게 안내한다(이슈 #124).
+                omitted_files.extend(report.dropped_files)
+                partial_files.extend(report.truncated_files)
 
         if not successful:
             logger.warning(
@@ -629,9 +666,15 @@ class ReviewPipeline:
         if len(successful) > 1:
             combined_summary = await self._reduce_summary(event, successful, combined_summary)
         notes: list[str] = []
+        omitted_files = list(dict.fromkeys(omitted_files))
+        partial_files = [p for p in dict.fromkeys(partial_files) if p not in omitted_files]
         if omitted_files:
             notes.append(
                 f"리뷰하지 못한 파일 {len(omitted_files)}개: {_format_omitted_files(omitted_files)}"
+            )
+        if partial_files:
+            notes.append(
+                f"일부만 리뷰된 파일 {len(partial_files)}개: {_format_omitted_files(partial_files)}"
             )
         if notes:
             combined_summary += "\n\n" + "\n".join(f"({n})" for n in notes)
@@ -1030,6 +1073,7 @@ class ReviewPipeline:
         *,
         extra_user_suffix: str = "",
         include_shared: bool = True,
+        report: _PromptReport | None = None,
     ) -> list[ChatMessage] | None:
         """오늘의 _build_messages() 결과를 실측 토큰 수로 검증하고, 예산을 넘으면
         보조 정보부터 순서대로 줄여 재조립한다(이슈 #98).
@@ -1076,6 +1120,7 @@ class ReviewPipeline:
                 diff_max_chars=overrides.get("diff"),
                 extra_user_suffix=extra_user_suffix,
                 include_shared=include_shared,
+                report=report,
             )
             text = messages[0]["content"] + messages[1]["content"]
             actual = await self._count_tokens(text)
@@ -1307,8 +1352,9 @@ class ReviewPipeline:
         effective_max_context = await self._resolve_max_context()
         budget = effective_max_context - self._max_tokens - _SAFETY_MARGIN_TOKENS
 
-        async def common_tokens_for(include_shared: bool) -> int:
-            messages, _ = self._build_messages(
+        async def common_for(include_shared: bool) -> tuple[int, int]:
+            """(공통 부분의 토큰 수, diff 글자 상한에서 빠지는 공통 부분 글자 수)."""
+            messages, sections = self._build_messages(
                 event,
                 [],
                 related_context,
@@ -1316,29 +1362,47 @@ class ReviewPipeline:
                 official_docs_context,
                 include_shared=include_shared,
             )
-            return await self._count_tokens(messages[0]["content"] + messages[1]["content"])
-
-        common_first = await common_tokens_for(True)
-        common_rest = await common_tokens_for(False)
-        target_tokens = {
-            t.file_path: await self._count_tokens(
-                self._render_target(t, related_context.get(t.file_path, []))
+            tokens = await self._count_tokens(messages[0]["content"] + messages[1]["content"])
+            shared_chars = sum(
+                len(sections[key])
+                for key in ("context", "pr_section", "api_spec_context", "official_docs_context")
             )
-            for t in targets
-        }
+            return tokens, shared_chars
+
+        common_first, shared_chars_first = await common_for(True)
+        common_rest, shared_chars_rest = await common_for(False)
+        # 프롬프트 조립(_truncate_diff_blocks)은 토큰 예산과 별개로 글자 상한(파일당·
+        # 전체)도 적용하므로, 토큰만 보고 묶으면 상한을 넘는 뒤쪽 파일이 조용히
+        # 빠진다(이슈 #124). 글자 상한도 함께 보고 배치를 나눈다.
+        char_budget_first = max(0, _MAX_DIFF_TOTAL_CHARS - shared_chars_first)
+        char_budget_rest = max(0, _MAX_DIFF_TOTAL_CHARS - shared_chars_rest)
+        target_tokens: dict[str, int] = {}
+        target_chars: dict[str, int] = {}
+        for t in targets:
+            rendered = self._render_target(t, related_context.get(t.file_path, []))
+            target_tokens[t.file_path] = await self._count_tokens(rendered)
+            target_chars[t.file_path] = min(len(rendered), _MAX_DIFF_FILE_CHARS)
 
         def pack(ordered: list[ReviewTarget]) -> list[list[ReviewTarget]]:
             packed: list[list[ReviewTarget]] = []
             current: list[ReviewTarget] = []
             current_tokens = common_first
+            current_chars = 0
+            char_budget = char_budget_first
             for target in ordered:
                 tokens = target_tokens[target.file_path]
-                if current and current_tokens + tokens > budget:
+                chars = target_chars[target.file_path]
+                if current and (
+                    current_tokens + tokens > budget or current_chars + chars > char_budget
+                ):
                     packed.append(current)
                     current = []
                     current_tokens = common_rest
+                    current_chars = 0
+                    char_budget = char_budget_rest
                 current.append(target)
                 current_tokens += tokens
+                current_chars += chars
             if current:
                 packed.append(current)
             return packed
@@ -1487,6 +1551,7 @@ class ReviewPipeline:
         diff_max_chars: int | None = None,
         extra_user_suffix: str = "",
         include_shared: bool = True,
+        report: _PromptReport | None = None,
     ) -> tuple[list[ChatMessage], dict[str, str]]:
         """override 인자(*_max_chars)를 전부 안 주면(=None) 오늘의 문자 기반 조립
         로직과 100% 동일하게 동작한다 — `_assemble_within_budget()`이 예산 초과가
@@ -1535,7 +1600,12 @@ class ReviewPipeline:
                 - len(official_docs_context)
                 - len(pr_section),
             )
-        diff = _truncate_diff_blocks(blocks, max_total_chars=diff_budget)
+        diff, dropped_files, truncated_files = _truncate_diff_blocks_detailed(
+            blocks, max_total_chars=diff_budget
+        )
+        if report is not None:
+            report.dropped_files = dropped_files
+            report.truncated_files = truncated_files
         user = f"## Project Context\n{context}\n\n## Changes\n{diff}" if context else diff
         user = pr_section + user
         user += api_spec_context
