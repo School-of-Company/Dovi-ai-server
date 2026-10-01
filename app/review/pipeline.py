@@ -3,6 +3,7 @@ import functools
 import logging
 import math
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -18,7 +19,7 @@ from app.rag.api_spec_schema import ApiSpecSearchResult
 from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze
-from app.review.diff_lines import annotate_hunk, classify_finding_lines
+from app.review.diff_lines import LineCheckRecord, annotate_hunk, classify_finding_lines
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
     ChangedFile,
@@ -445,6 +446,9 @@ class SummaryTextLLM(Protocol):
     ) -> str: ...
 
 
+LineCheckSink = Callable[[LineCheckRecord], Awaitable[None]]
+
+
 class ContextRetriever(Protocol):
     def retrieve(
         self,
@@ -510,6 +514,7 @@ class ReviewPipeline:
         max_review_batches: int = _MAX_REVIEW_BATCHES,
         annotate_diff_lines: bool = False,
         summary_llm: SummaryTextLLM | None = None,
+        line_check_sink: LineCheckSink | None = None,
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
@@ -526,6 +531,7 @@ class ReviewPipeline:
         self._max_review_batches = max_review_batches
         self._annotate_diff_lines = annotate_diff_lines
         self._summary_llm = summary_llm
+        self._line_check_sink = line_check_sink
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
@@ -681,7 +687,7 @@ class ReviewPipeline:
 
         # dependency_findings는 lockfile patch 기준으로 줄이 이미 정확해 통계를 왜곡하므로
         # 모델이 만든 finding만 측정한다.
-        self._log_finding_lines("llm", event, all_llm_reviews)
+        llm_line_counts = self._log_finding_lines("llm", event, all_llm_reviews)
 
         all_reviews = list(all_llm_reviews)
         all_reviews.extend(dependency_findings)
@@ -689,7 +695,8 @@ class ReviewPipeline:
         reviews = filter_reviews(all_reviews)
         if reviews:
             reviews = await self._verify_across_batches(event, reviews, review_to_messages)
-        self._log_finding_lines("final", event, reviews)
+        final_line_counts = self._log_finding_lines("final", event, reviews)
+        await self._record_line_check(event, llm_line_counts, final_line_counts)
         summary = self._build_summary(combined_summary, all_reviews, all_llm_reviews)
         logger.info(
             "review completed reviewJobId=%s reviewCount=%d batches=%d",
@@ -1631,7 +1638,7 @@ class ReviewPipeline:
 
     def _log_finding_lines(
         self, stage: str, event: ReviewRequestedEvent, reviews: list[ReviewComment]
-    ) -> None:
+    ) -> dict[str, int]:
         counts = classify_finding_lines(reviews, event.changed_files)
         logger.info(
             "finding lines checked stage=%s reviewJobId=%s annotated=%s total=%d "
@@ -1644,6 +1651,33 @@ class ReviewPipeline:
             counts["line_not_in_diff"],
             counts["file_not_in_diff"],
         )
+        return counts
+
+    async def _record_line_check(
+        self,
+        event: ReviewRequestedEvent,
+        llm_counts: dict[str, int],
+        final_counts: dict[str, int],
+    ) -> None:
+        """측정 결과를 DB에 남긴다. 로그는 배포 때마다 초기화돼서 수치가 안 쌓이기 때문이다.
+        저장이 실패해도 리뷰는 그대로 나간다."""
+        if self._line_check_sink is None:
+            return
+        try:
+            await self._line_check_sink(
+                LineCheckRecord(
+                    review_job_id=event.review_job_id,
+                    annotated=self._annotate_diff_lines,
+                    llm=llm_counts,
+                    final=final_counts,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "failed to persist line check reviewJobId=%s",
+                event.review_job_id,
+                exc_info=True,
+            )
 
     def _render_target(
         self, target: ReviewTarget, related: list[ChunkSearchResult]

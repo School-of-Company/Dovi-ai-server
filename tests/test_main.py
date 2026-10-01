@@ -629,6 +629,9 @@ class FakeEvaluationRepository:
     async def upsert_feedback(self, feedback: object) -> None:
         pass
 
+    async def save_line_check(self, record: object) -> None:
+        pass
+
 
 class FakeConnection:
     def __init__(self, *, raise_on_execute: bool = False) -> None:

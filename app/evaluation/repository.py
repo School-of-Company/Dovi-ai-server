@@ -6,8 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.evaluation.models import ReviewFeedbackRow, ReviewJobRow, ReviewRecordRow
+from app.evaluation.models import (
+    ReviewFeedbackRow,
+    ReviewJobRow,
+    ReviewLineCheckRow,
+    ReviewRecordRow,
+)
 from app.evaluation.schema import ReviewFeedbackEvent
+from app.review.diff_lines import LineCheckRecord
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent
 
 logger = logging.getLogger(__name__)
@@ -129,3 +135,27 @@ class SqlAlchemyEvaluationRepository:
                 "failed to upsert review_feedback (unknown reviewJobId=%s?)",
                 feedback.review_job_id,
             )
+
+    async def save_line_check(self, record: LineCheckRecord) -> None:
+        values = {
+            "annotated": record.annotated,
+            "llm_ok": record.llm["ok"],
+            "llm_line_not_in_diff": record.llm["line_not_in_diff"],
+            "llm_file_not_in_diff": record.llm["file_not_in_diff"],
+            "final_ok": record.final["ok"],
+            "final_line_not_in_diff": record.final["line_not_in_diff"],
+            "final_file_not_in_diff": record.final["file_not_in_diff"],
+        }
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(ReviewLineCheckRow, record.review_job_id)
+            if row is None:
+                session.add(
+                    ReviewLineCheckRow(
+                        review_job_id=record.review_job_id,
+                        created_at=datetime.now(UTC),
+                        **values,
+                    )
+                )
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)

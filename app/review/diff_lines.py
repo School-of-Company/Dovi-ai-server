@@ -1,5 +1,6 @@
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from app.review.schema import ChangedFile, ReviewComment
 
@@ -59,3 +60,14 @@ def classify_finding_lines(
         else:
             counts["line_not_in_diff"] += 1
     return counts
+
+
+@dataclass(frozen=True)
+class LineCheckRecord:
+    """리뷰 한 건의 finding 줄 번호 측정 결과(이슈 #122). llm은 필터 전 모델 원본,
+    final은 실제로 게시될 finding 기준이며 키는 classify_finding_lines()와 같다."""
+
+    review_job_id: str
+    annotated: bool
+    llm: dict[str, int]
+    final: dict[str, int]
