@@ -11,6 +11,7 @@ _COMMENT_ANSWER_CONSUMER_GROUP_ID = "dovi-ai-comment-answer-engine"
 _REVIEW_FEEDBACK_CONSUMER_GROUP_ID = "dovi-ai-review-feedback-engine"
 _REPO_INDEX_CONSUMER_GROUP_ID = "dovi-ai-repo-index-engine"
 _SANDBOX_PROBE_CONSUMER_GROUP_ID = "dovi-ai-sandbox-probe-engine"
+_PR_HEAD_TRACKER_GROUP_ID = "dovi-ai-pr-head-tracker"
 
 
 def create_producer(settings: Settings) -> AIOKafkaProducer:
@@ -35,6 +36,22 @@ def create_consumer(settings: Settings) -> AIOKafkaConsumer:
         enable_auto_commit=False,
         # 리뷰 요청은 워크큐 성격 — 재배포로 그룹이 끊겼다 재개돼도 밀린 요청을
         # 건너뛰지 않고 전부 처리해야 한다.
+        auto_offset_reset="earliest",
+    )
+
+
+def create_pr_head_tracker_consumer(settings: Settings) -> AIOKafkaConsumer:
+    logger.info(
+        "creating kafka pr-head tracker consumer bootstrap_servers=%s topic=%s group_id=%s",
+        settings.kafka_bootstrap_servers,
+        settings.kafka_review_request_topic,
+        _PR_HEAD_TRACKER_GROUP_ID,
+    )
+    return AIOKafkaConsumer(
+        settings.kafka_review_request_topic,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        group_id=_PR_HEAD_TRACKER_GROUP_ID,
+        enable_auto_commit=False,
         auto_offset_reset="earliest",
     )
 

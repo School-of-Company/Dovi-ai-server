@@ -863,3 +863,54 @@ async def test_lifespan_leaves_langfuse_unconfigured_when_disabled(
             await asyncio.sleep(0.05)
     finally:
         get_settings.cache_clear()
+
+
+async def _run_lifespan_tracking_pr_head_tracker(
+    monkeypatch: pytest.MonkeyPatch, **flags: str
+) -> list[FakeConsumerSource]:
+    get_settings.cache_clear()
+    monkeypatch.setenv("KAFKA_CONSUMER_ENABLED", "true")
+    monkeypatch.setenv("GRACEFUL_SHUTDOWN_SECONDS", "0.05")
+    for key, value in flags.items():
+        monkeypatch.setenv(key, value)
+
+    created: list[FakeConsumerSource] = []
+
+    def make_tracker(settings: object) -> FakeConsumerSource:
+        source = FakeConsumerSource()
+        created.append(source)
+        return source
+
+    monkeypatch.setattr("app.main.create_producer", lambda settings: FakeStartStop())
+    monkeypatch.setattr("app.main.create_consumer", lambda settings: FakeConsumerSource())
+    monkeypatch.setattr(
+        "app.main.create_comment_answer_consumer", lambda settings: FakeConsumerSource()
+    )
+    monkeypatch.setattr("app.main.create_pr_head_tracker_consumer", make_tracker)
+    try:
+        async with lifespan(app):
+            await asyncio.sleep(0.05)
+            started = [source.started for source in created]
+        assert all(started)
+        assert all(source.stopped for source in created)
+    finally:
+        get_settings.cache_clear()
+    return created
+
+
+async def test_lifespan_runs_pr_head_tracker_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await _run_lifespan_tracking_pr_head_tracker(monkeypatch)
+
+    assert len(created) == 1
+
+
+async def test_lifespan_skips_pr_head_tracker_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await _run_lifespan_tracking_pr_head_tracker(
+        monkeypatch, REVIEW_SKIP_SUPERSEDED_ENABLED="false"
+    )
+
+    assert created == []
