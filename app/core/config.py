@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     # 줄 번호를 직접 계산하다 틀리는 것을 줄인다(이슈 #122). 기본 False: 로그
     # `finding lines checked`로 기준 수치를 모은 뒤 .env에서 켜서 전후를 비교한다.
     review_diff_line_numbers_enabled: bool = False
+    # 비우면 프롬프트 내용 해시(sha-xxxxxxxx)를 평가 DB의 prompt_version으로 기록한다.
+    prompt_version: str = ""
 
     redis_url: str = "redis://localhost:6379"
     # headSha는 불변이므로 TTL을 길게 잡아도 무방하다 (기본 24시간)

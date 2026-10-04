@@ -28,7 +28,7 @@ from app.review.dedup import (
     create_dedup_store,
     create_redis_client,
 )
-from app.review.pipeline import ReviewPipeline
+from app.review.pipeline import ReviewPipeline, compute_prompt_version
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pipeline = ReviewPipeline(
             llm_client,
             model_version=settings.llm_model,
-            prompt_version="v1",
+            prompt_version=settings.prompt_version
+            or compute_prompt_version(
+                annotate_diff_lines=settings.review_diff_line_numbers_enabled
+            ),
             llm_max_context=settings.llm_max_context,
             max_tokens=settings.llm_max_tokens,
             verify_max_tokens=settings.llm_verify_max_tokens,
