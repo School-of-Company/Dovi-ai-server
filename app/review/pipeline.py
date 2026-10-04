@@ -4,6 +4,7 @@ import hashlib
 import logging
 import math
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -35,6 +36,7 @@ from app.review.schema import (
     ReviewTarget,
     VerificationResult,
 )
+from app.review.timing import ReviewTimingRecord, to_ms
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +480,7 @@ class SummaryTextLLM(Protocol):
 
 
 LineCheckSink = Callable[[LineCheckRecord], Awaitable[None]]
+TimingSink = Callable[[ReviewTimingRecord], Awaitable[None]]
 
 
 class ContextRetriever(Protocol):
@@ -554,6 +557,7 @@ class ReviewPipeline:
         annotate_diff_lines: bool = False,
         summary_llm: SummaryTextLLM | None = None,
         line_check_sink: LineCheckSink | None = None,
+        timing_sink: TimingSink | None = None,
         retriever: ContextRetriever | None = None,
         notion_link_store: NotionLinkStore | None = None,
         api_spec_retriever: ApiSpecContextRetriever | None = None,
@@ -571,6 +575,7 @@ class ReviewPipeline:
         self._annotate_diff_lines = annotate_diff_lines
         self._summary_llm = summary_llm
         self._line_check_sink = line_check_sink
+        self._timing_sink = timing_sink
         self._retriever = retriever
         self._notion_link_store = notion_link_store
         self._api_spec_retriever = api_spec_retriever
@@ -584,6 +589,7 @@ class ReviewPipeline:
     async def run(
         self, event: ReviewRequestedEvent
     ) -> ReviewCompletedEvent | ReviewFailedEvent:
+        started = time.monotonic()
         targets = analyze(event)
         await self._maybe_save_notion_link(event)
 
@@ -617,6 +623,8 @@ class ReviewPipeline:
             )
             return self._failed(event, "context_overflow")
 
+        prepared = time.monotonic()
+        prompt_chars = 0
         # 배치별 결과: (LLM 출력, 실제로 쓰인 messages, 그 배치가 다룬 파일들).
         successful: list[tuple[ReviewModelOutput, list[ChatMessage], list[str]]] = []
         partial_files: list[str] = []
@@ -674,6 +682,7 @@ class ReviewPipeline:
                     continue
 
                 output, used_messages = result
+                prompt_chars += sum(len(m["content"]) for m in used_messages)
                 successful.append(
                     (output, used_messages, [t.file_path for t in batch_targets])
                 )
@@ -693,6 +702,7 @@ class ReviewPipeline:
             )
             return self._failed(event, last_reason)
 
+        generated = time.monotonic()
         # --- reduce ---
         all_llm_reviews: list[ReviewComment] = []
         review_to_messages: dict[int, list[ChatMessage]] = {}
@@ -716,6 +726,7 @@ class ReviewPipeline:
         combined_summary = successful[0][0].summary
         if len(successful) > 1:
             combined_summary = await self._reduce_summary(event, successful, combined_summary)
+        summarized = time.monotonic()
         notes: list[str] = []
         # 큰 파일은 조각으로 나뉘어 일부 조각만 리뷰됐을 수 있다 — 그런 파일은
         # "리뷰하지 못한 파일"이 아니라 "일부만 리뷰된 파일"로 안내한다.
@@ -739,6 +750,7 @@ class ReviewPipeline:
         reviews = filter_reviews(all_reviews)
         if reviews:
             reviews = await self._verify_across_batches(event, reviews, review_to_messages)
+        verified = time.monotonic()
         final_line_counts = self._log_finding_lines("final", event, reviews)
         await self._record_line_check(event, llm_line_counts, final_line_counts)
         summary = self._build_summary(combined_summary, all_reviews, all_llm_reviews)
@@ -748,7 +760,45 @@ class ReviewPipeline:
             len(reviews),
             len(successful),
         )
+        await self._record_timing(
+            ReviewTimingRecord(
+                review_job_id=event.review_job_id,
+                total_ms=to_ms(verified - started),
+                prep_ms=to_ms(prepared - started),
+                generate_ms=to_ms(generated - prepared),
+                summary_ms=to_ms(summarized - generated),
+                verify_ms=to_ms(verified - summarized),
+                batches=len(successful),
+                targets=len(targets),
+                prompt_chars=prompt_chars,
+            )
+        )
         return self._completed(event, summary, reviews)
+
+    async def _record_timing(self, record: ReviewTimingRecord) -> None:
+        logger.info(
+            "review timing reviewJobId=%s total_ms=%d prep_ms=%d generate_ms=%d "
+            "summary_ms=%d verify_ms=%d batches=%d targets=%d prompt_chars=%d",
+            record.review_job_id,
+            record.total_ms,
+            record.prep_ms,
+            record.generate_ms,
+            record.summary_ms,
+            record.verify_ms,
+            record.batches,
+            record.targets,
+            record.prompt_chars,
+        )
+        if self._timing_sink is None:
+            return
+        try:
+            await self._timing_sink(record)
+        except Exception:
+            logger.warning(
+                "failed to persist review timing reviewJobId=%s",
+                record.review_job_id,
+                exc_info=True,
+            )
 
     def _completed(
         self,

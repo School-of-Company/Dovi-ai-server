@@ -11,10 +11,12 @@ from app.evaluation.models import (
     ReviewJobRow,
     ReviewLineCheckRow,
     ReviewRecordRow,
+    ReviewTimingRow,
 )
 from app.evaluation.schema import ReviewFeedbackEvent
 from app.review.diff_lines import LineCheckRecord
 from app.review.schema import ReviewCompletedEvent, ReviewFailedEvent
+from app.review.timing import ReviewTimingRecord
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,31 @@ class SqlAlchemyEvaluationRepository:
             if row is None:
                 session.add(
                     ReviewLineCheckRow(
+                        review_job_id=record.review_job_id,
+                        created_at=datetime.now(UTC),
+                        **values,
+                    )
+                )
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)
+
+    async def save_review_timing(self, record: ReviewTimingRecord) -> None:
+        values = {
+            "total_ms": record.total_ms,
+            "prep_ms": record.prep_ms,
+            "generate_ms": record.generate_ms,
+            "summary_ms": record.summary_ms,
+            "verify_ms": record.verify_ms,
+            "batches": record.batches,
+            "targets": record.targets,
+            "prompt_chars": record.prompt_chars,
+        }
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(ReviewTimingRow, record.review_job_id)
+            if row is None:
+                session.add(
+                    ReviewTimingRow(
                         review_job_id=record.review_job_id,
                         created_at=datetime.now(UTC),
                         **values,
