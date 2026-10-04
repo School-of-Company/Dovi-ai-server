@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# 배포가 겹치면 앞 배포가 구 컨테이너를 종료하는 동안 뒤 배포가 같은 컨테이너를 다시
+# 만들려다 이름 충돌로 둘 다 실패하고 api가 내려간다. 진행 중인 배포는 끊지 않고 줄 세운다.
+concurrency:
+  group: cd-deploy
+  cancel-in-progress: false
+
 jobs:
   build-push:
     runs-on: ubuntu-latest
