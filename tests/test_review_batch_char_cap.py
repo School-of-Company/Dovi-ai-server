@@ -96,15 +96,18 @@ async def test_first_batch_leaves_room_for_the_pr_description_in_the_char_cap() 
     assert [len(b) for b in described] == [2, 1]
 
 
-async def test_partially_truncated_files_are_reported_in_the_summary() -> None:
-    # 파일 하나가 파일당 상한(8k자)을 넘으면 앞부분만 보인다 — 사용자에게 안내해야 한다.
+async def test_large_file_is_split_into_pieces_instead_of_truncated() -> None:
+    # 파일 하나가 파일당 상한(8k자)을 넘어도 뒷부분을 버리지 않고 조각으로 나눠 전부 리뷰한다.
     patches = {"src/big.py": _patch(200), "src/small.py": _patch(5)}
-    fake = FakeLLM(output=ReviewModelOutput(summary="요약", reviews=[]))
+    fake = FakeLLM(sequence=_outputs(3))
 
     result = await _pipeline(fake).run(_event(patches))
 
     assert isinstance(result, ReviewCompletedEvent)
-    assert "(일부만 리뷰된 파일 1개: src/big.py)" in result.summary
+    prompts = [call[0][1]["content"] for call in fake.generate_calls]
+    assert all("...(truncated)" not in prompt for prompt in prompts)
+    assert any("src/big.py" in prompt for prompt in prompts)
+    assert "일부만 리뷰된 파일" not in result.summary
     assert "리뷰하지 못한 파일" not in result.summary
 
 
@@ -198,3 +201,18 @@ def test_truncate_diff_blocks_detailed_is_empty_for_small_diffs() -> None:
     diff, dropped, truncated = _truncate_diff_blocks_detailed([("a.py", "small")])
 
     assert (diff, dropped, truncated) == ("small", [], [])
+
+
+async def test_file_with_only_some_pieces_reviewed_is_reported_as_partial() -> None:
+    # 큰 파일이 조각 여러 개로 나뉘었는데 배치 상한 때문에 일부 조각만 리뷰된 경우,
+    # "리뷰하지 못한 파일"이 아니라 "일부만 리뷰된 파일"로 안내해야 한다.
+    fake = FakeLLM(sequence=_outputs(2))
+    pipeline = ReviewPipeline(
+        fake, model_version="v", prompt_version="v1", max_review_batches=2
+    )
+
+    result = await pipeline.run(_event({"src/huge.py": _patch(600)}))
+
+    assert isinstance(result, ReviewCompletedEvent)
+    assert "(일부만 리뷰된 파일 1개: src/huge.py)" in result.summary
+    assert "리뷰하지 못한 파일" not in result.summary
