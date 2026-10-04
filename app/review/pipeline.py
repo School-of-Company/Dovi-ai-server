@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import hashlib
 import logging
 import math
 import re
@@ -498,6 +499,14 @@ class OfficialDocsContextBuilder(Protocol):
         LLM 프롬프트에 포함되며, breaking change 여부 판단은 LLM이 한다.
         """
         ...
+
+
+def compute_prompt_version(*, annotate_diff_lines: bool = False) -> str:
+    parts = [_SYSTEM_PROMPT, _VERIFY_SYSTEM_PROMPT, _SUMMARY_REDUCE_PROMPT]
+    if annotate_diff_lines:
+        parts.append(_LINE_NUMBER_NOTE)
+    digest = hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+    return f"sha-{digest[:8]}"
 
 
 class ReviewPipeline:
