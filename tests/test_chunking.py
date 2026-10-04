@@ -116,8 +116,63 @@ def test_extract_context_chunks_java_returns_enclosing_method() -> None:
     assert "unrelated" not in chunk.source
 
 
-def test_extract_context_chunks_returns_none_for_unsupported_language() -> None:
-    assert extract_context_chunks("app.rb", "def foo; end", "@@ -1 +1 @@\n+x") is None
+def test_extract_context_chunks_uses_line_window_for_unsupported_language() -> None:
+    content = "\n".join(f"line{i}" for i in range(1, 101))
+    patch = "@@ -50,1 +50,1 @@\n+line50"
+
+    chunks = extract_context_chunks("app.rb", content, patch)
+
+    assert chunks is not None
+    assert len(chunks) == 1
+    assert chunks[0].node_type == "fallback_window"
+    assert (chunks[0].start_line, chunks[0].end_line) == (35, 65)
+    assert chunks[0].source.splitlines()[0] == "line35"
+
+
+def test_extract_context_chunks_window_is_clamped_to_file_bounds() -> None:
+    chunks = extract_context_chunks("a.go", "x\ny\nz", "@@ -1 +1 @@\n+x")
+
+    assert chunks is not None
+    assert (chunks[0].start_line, chunks[0].end_line) == (1, 3)
+
+
+def test_extract_context_chunks_skips_binary_content_for_unsupported_language() -> None:
+    assert extract_context_chunks("a.bin", "ab\x00cd", "@@ -1 +1 @@\n+ab") is None
+
+
+_KT_CONTENT = """package a.b
+
+@Service
+class UserService(private val repo: UserRepository) {
+    @Transactional
+    fun rename(id: Long, name: String): User {
+        val user = repo.findById(id)
+        user.name = name
+        return user
+    }
+
+    fun other(): Int {
+        return 1
+    }
+}
+"""
+
+
+def test_detect_language_kotlin() -> None:
+    assert detect_language("src/UserService.kt") == "kotlin"
+    assert detect_language("build.gradle.kts") == "kotlin"
+
+
+def test_extract_context_chunks_kotlin_returns_enclosing_function() -> None:
+    patch = "@@ -7,1 +7,1 @@\n+        user.name = name"
+
+    chunks = extract_context_chunks("UserService.kt", _KT_CONTENT, patch)
+
+    assert chunks is not None
+    assert len(chunks) == 1
+    assert chunks[0].node_type == "function_declaration"
+    assert chunks[0].name == "rename"
+    assert "fun other" not in chunks[0].source
 
 
 def test_extract_context_chunks_returns_none_without_changed_lines() -> None:
