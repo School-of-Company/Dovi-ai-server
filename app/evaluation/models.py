@@ -81,3 +81,23 @@ class ReviewLineCheckRow(Base):
     final_line_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
     final_file_not_in_diff: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReviewTimingRow(Base):
+    """리뷰 한 건의 단계별 소요 시간(이슈 #134). 병목을 확인한 뒤 캐시·추론 설정을 정하는 근거다.
+
+    review_line_checks와 같은 이유로 review_jobs를 참조하지 않는다.
+    """
+
+    __tablename__ = "review_timings"
+
+    review_job_id: Mapped[str] = mapped_column(String, primary_key=True)
+    total_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    prep_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    generate_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    verify_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    batches: Mapped[int] = mapped_column(Integer, nullable=False)
+    targets: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

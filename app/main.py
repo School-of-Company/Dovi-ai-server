@@ -218,6 +218,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if evaluation_repository is not None
                 else None
             ),
+            timing_sink=(
+                evaluation_repository.save_review_timing
+                if evaluation_repository is not None
+                else None
+            ),
             retriever=retriever,
             api_spec_retriever=api_spec_retriever,
             notion_link_store=notion_link_store,
