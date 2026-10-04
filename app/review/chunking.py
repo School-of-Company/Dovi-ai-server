@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import tree_sitter_java as tsjava
 import tree_sitter_javascript as tsjavascript
+import tree_sitter_kotlin as tskotlin
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser
@@ -16,6 +17,8 @@ _EXTENSION_LANGUAGE = {
     ".ts": "typescript",
     ".tsx": "typescript",
     ".java": "java",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
 }
 
 _BOUNDARY_NODE_TYPES: dict[str, set[str]] = {
@@ -28,6 +31,12 @@ _BOUNDARY_NODE_TYPES: dict[str, set[str]] = {
         "enum_declaration",
         "method_declaration",
         "constructor_declaration",
+    },
+    "kotlin": {
+        "class_declaration",
+        "object_declaration",
+        "function_declaration",
+        "secondary_constructor",
     },
 }
 
@@ -54,6 +63,8 @@ def _get_parser(language: str) -> Parser:
             lang = Language(tstypescript.language_typescript())
         elif language == "java":
             lang = Language(tsjava.language())
+        elif language == "kotlin":
+            lang = Language(tskotlin.language())
         else:
             raise ValueError(f"unsupported language: {language}")
         _parsers[language] = Parser(lang)
@@ -119,6 +130,23 @@ def _merge_windows(lines: list[int], total_lines: int, radius: int) -> list[tupl
     return merged
 
 
+def _window_chunks(encoded: bytes, lines: list[int]) -> list[AstChunk] | None:
+    # 바이너리/비텍스트(NUL 포함)는 줄 컨텍스트가 의미 없다.
+    if b"\x00" in encoded:
+        return None
+    encoded_lines = encoded.split(b"\n")
+    return [
+        AstChunk(
+            node_type="fallback_window",
+            name=None,
+            start_line=start,
+            end_line=end,
+            source=b"\n".join(encoded_lines[start - 1 : end]).decode("utf-8", "replace"),
+        )
+        for start, end in _merge_windows(lines, len(encoded_lines), _FALLBACK_WINDOW_RADIUS)
+    ] or None
+
+
 def _find_enclosing_boundary(
     root: Node, encoded_lines: list[bytes], line: int, boundary_types: set[str]
 ) -> Node | None:
@@ -149,14 +177,14 @@ def extract_context_chunks(
     diff hunk 방식으로 안전하게 fallback할 수 있게 한다.
     """
     language = detect_language(file_path)
-    if language is None:
-        return None
-
     changed_lines = changed_line_numbers(patch)
     if not changed_lines:
         return None
 
     encoded = content.encode("utf-8")
+    if language is None:
+        return _window_chunks(encoded, sorted(changed_lines))
+
     try:
         parser = _get_parser(language)
         tree = parser.parse(encoded)
@@ -205,21 +233,12 @@ def extract_context_chunks(
         )
 
     if orphan_lines:
-        total_lines = len(encoded_lines)
-        for start, end in _merge_windows(orphan_lines, total_lines, _FALLBACK_WINDOW_RADIUS):
-            key = (start, end)
+        for chunk in _window_chunks(encoded, orphan_lines) or []:
+            key = (chunk.start_line, chunk.end_line)
             if key in seen_ranges:
                 continue
             seen_ranges.add(key)
-            chunks.append(
-                AstChunk(
-                    node_type="fallback_window",
-                    name=None,
-                    start_line=start,
-                    end_line=end,
-                    source=b"\n".join(encoded_lines[start - 1 : end]).decode("utf-8"),
-                )
-            )
+            chunks.append(chunk)
 
     return chunks or None
 
