@@ -130,8 +130,8 @@ async def test_files_dropped_while_assembling_the_prompt_are_reported_by_us() ->
     assert isinstance(result, ReviewCompletedEvent)
     prompt = fake.generate_calls[0][0][1]["content"]
     assert "크기 제한으로 생략된 파일 1개: src/f4.py" in prompt
-    assert "(리뷰하지 못한 파일 1개: src/f4.py)" in result.summary
-    assert "(일부만 리뷰된 파일 1개: src/f3.py)" in result.summary
+    assert "(리뷰하지 못한 파일 1개: `f4.py`)" in result.summary
+    assert "(일부만 리뷰된 파일 1개: `f3.py`)" in result.summary
 
 
 async def test_batch_failure_and_prompt_drop_do_not_list_a_file_twice() -> None:
@@ -150,8 +150,8 @@ async def test_batch_failure_and_prompt_drop_do_not_list_a_file_twice() -> None:
     result = await pipeline.run(event)
 
     assert isinstance(result, ReviewCompletedEvent)
-    assert "(리뷰하지 못한 파일 1개: src/f4.py)" in result.summary
-    assert result.summary.count("src/f4.py") == 1
+    assert "(리뷰하지 못한 파일 1개: `f4.py`)" in result.summary
+    assert result.summary.count("f4.py") == 1
 
 
 def test_build_messages_fills_the_prompt_report() -> None:
@@ -214,5 +214,5 @@ async def test_file_with_only_some_pieces_reviewed_is_reported_as_partial() -> N
     result = await pipeline.run(_event({"src/huge.py": _patch(600)}))
 
     assert isinstance(result, ReviewCompletedEvent)
-    assert "(일부만 리뷰된 파일 1개: src/huge.py)" in result.summary
+    assert "(일부만 리뷰된 파일 1개: `huge.py`)" in result.summary
     assert "리뷰하지 못한 파일" not in result.summary

@@ -128,17 +128,32 @@ def _is_low_priority_path(path: str) -> bool:
     return _LOW_PRIORITY_PATH.search(path) is not None
 
 
-def _format_omitted_files(paths: list[str]) -> str:
-    """생략된 파일 목록을 PR 작성자가 읽을 수 있게 접는다 — 5개 이하면 파일명을
-    그대로, 그 이상이면 디렉터리별 개수로 묶는다."""
-    if len(paths) <= 5:
-        return ", ".join(paths)
-    counts: dict[str, int] = {}
-    for path in paths:
-        directory = path.rsplit("/", 1)[0] + "/" if "/" in path else "(루트)"
-        counts[directory] = counts.get(directory, 0) + 1
-    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return ", ".join(f"{directory} {count}개" for directory, count in ordered)
+_FOLD_FILE_NOTE_OVER = 3
+
+
+def _short_names(paths: list[str]) -> list[str]:
+    """파일명(basename)만 보여주되, 같은 이름이 둘 이상이면 구분될 때까지 상위 디렉터리를 붙인다."""
+    parts = [path.split("/") for path in paths]
+    depth = [1] * len(paths)
+    while True:
+        names = ["/".join(p[-d:]) for p, d in zip(parts, depth, strict=True)]
+        clashing = {n for n in names if names.count(n) > 1}
+        grown = False
+        for i, name in enumerate(names):
+            if name in clashing and depth[i] < len(parts[i]):
+                depth[i] += 1
+                grown = True
+        if not grown:
+            return names
+
+
+def _format_file_note(title: str, paths: list[str]) -> str:
+    """생략/일부 리뷰 파일 안내. 적으면 한 줄, 많으면 접어서 요약 본문을 짧게 유지한다."""
+    names = [f"`{name}`" for name in _short_names(paths)]
+    if len(names) <= _FOLD_FILE_NOTE_OVER:
+        return f"({title} {len(names)}개: {', '.join(names)})"
+    items = "\n".join(f"- {name}" for name in names)
+    return f"<details>\n<summary>{title} {len(names)}개</summary>\n\n{items}\n\n</details>"
 
 
 def _neutralize_closing_tag(text: str) -> str:
@@ -708,15 +723,11 @@ class ReviewPipeline:
         omitted_files = [p for p in dict.fromkeys(omitted_files) if p not in reviewed_files]
         partial_files = [p for p in dict.fromkeys(partial_files) if p not in omitted_files]
         if omitted_files:
-            notes.append(
-                f"리뷰하지 못한 파일 {len(omitted_files)}개: {_format_omitted_files(omitted_files)}"
-            )
+            notes.append(_format_file_note("리뷰하지 못한 파일", omitted_files))
         if partial_files:
-            notes.append(
-                f"일부만 리뷰된 파일 {len(partial_files)}개: {_format_omitted_files(partial_files)}"
-            )
+            notes.append(_format_file_note("일부만 리뷰된 파일", partial_files))
         if notes:
-            combined_summary += "\n\n" + "\n".join(f"({n})" for n in notes)
+            combined_summary += "\n\n" + "\n\n".join(notes)
 
         # dependency_findings는 lockfile patch 기준으로 줄이 이미 정확해 통계를 왜곡하므로
         # 모델이 만든 finding만 측정한다.

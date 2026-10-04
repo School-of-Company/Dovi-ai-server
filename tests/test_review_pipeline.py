@@ -1928,13 +1928,36 @@ def test_is_low_priority_path_detects_test_and_spec_files() -> None:
     assert not _is_low_priority_path("src/latest/handler.ts")
 
 
-def test_format_omitted_files_lists_few_and_groups_many() -> None:
-    from app.review.pipeline import _format_omitted_files
+def test_format_file_note_shows_basenames_inline_when_few() -> None:
+    from app.review.pipeline import _format_file_note
 
-    assert _format_omitted_files(["a.py", "src/b.py"]) == "a.py, src/b.py"
-    many = [f"src/proxy/f{i}.ts" for i in range(4)] + [f"test/t{i}.ts" for i in range(3)]
-    many.append("main.ts")
-    assert _format_omitted_files(many) == "src/proxy/ 4개, test/ 3개, (루트) 1개"
+    assert (
+        _format_file_note("리뷰하지 못한 파일", ["src/webhook/a.service.ts", "b.py"])
+        == "(리뷰하지 못한 파일 2개: `a.service.ts`, `b.py`)"
+    )
+
+
+def test_format_file_note_adds_parent_directory_only_for_clashing_names() -> None:
+    from app.review.pipeline import _format_file_note
+
+    note = _format_file_note(
+        "일부만 리뷰된 파일", ["src/a/index.ts", "src/b/index.ts", "src/util.ts"]
+    )
+
+    assert "`a/index.ts`" in note
+    assert "`b/index.ts`" in note
+    assert "`util.ts`" in note
+
+
+def test_format_file_note_folds_into_details_when_many() -> None:
+    from app.review.pipeline import _format_file_note
+
+    note = _format_file_note("리뷰하지 못한 파일", [f"src/f{i}.ts" for i in range(4)])
+
+    assert note.startswith("<details>\n<summary>리뷰하지 못한 파일 4개</summary>")
+    assert "- `f0.ts`" in note
+    assert "- `f3.ts`" in note
+    assert note.endswith("</details>")
 
 
 async def test_split_targets_puts_source_files_before_test_files_when_batching() -> None:
@@ -2024,7 +2047,7 @@ async def test_later_batches_omit_pr_description_and_project_context() -> None:
     assert "프로젝트 컨텍스트 내용" not in second_user
 
 
-async def test_run_summary_lists_omitted_files_grouped_by_directory() -> None:
+async def test_run_summary_folds_many_omitted_files_into_details() -> None:
     big_patch = "@@ -0,0 +1,500 @@\n" + "\n".join(f"+line {i}" for i in range(500))
     paths = [f"src/mod/f{i}.ts" for i in range(_MAX_REVIEW_BATCHES + 6)]
     event = ReviewRequestedEvent(
@@ -2062,8 +2085,8 @@ async def test_run_summary_lists_omitted_files_grouped_by_directory() -> None:
     result = await pipeline.run(event)
 
     assert isinstance(result, ReviewCompletedEvent)
-    assert "리뷰하지 못한 파일 6개: src/mod/ 6개" in result.summary
-    assert "f10.ts" not in result.summary
+    assert "<summary>리뷰하지 못한 파일 6개</summary>" in result.summary
+    assert result.summary.count("- `f") == 6
 
 
 async def test_split_targets_respects_configured_max_review_batches() -> None:
