@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.kafka.client import (
     create_comment_answer_consumer,
     create_consumer,
+    create_pr_head_tracker_consumer,
     create_producer,
     create_repo_index_consumer,
     create_review_feedback_consumer,
@@ -29,6 +30,7 @@ from app.review.dedup import (
     create_redis_client,
 )
 from app.review.pipeline import ReviewPipeline, compute_prompt_version
+from app.review.superseded import PrHeadTracker, PrHeadTrackerConsumer
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         kafka_consumer = create_consumer(settings)
         await kafka_consumer.start()
 
+    pr_head_tracker_kafka_consumer = None
+    if review_on and settings.review_skip_superseded_enabled:
+        pr_head_tracker_kafka_consumer = create_pr_head_tracker_consumer(settings)
+        await pr_head_tracker_kafka_consumer.start()
+
     comment_answer_kafka_consumer = None
     if comment_on:
         comment_answer_kafka_consumer = create_comment_answer_consumer(settings)
@@ -269,13 +276,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             completed_topic=settings.kafka_review_completed_topic,
             failed_topic=settings.kafka_review_failed_topic,
         )
+        pr_head_tracker = (
+            PrHeadTracker(redis_client)
+            if pr_head_tracker_kafka_consumer is not None
+            else None
+        )
         review_consumer = ReviewRequestConsumer(
             kafka_consumer,
             pipeline,
             event_producer,
             dedup_store,
             evaluation_repository=evaluation_repository,
+            superseded=pr_head_tracker,
         )
+        if pr_head_tracker_kafka_consumer is not None:
+            assert pr_head_tracker is not None
+            tasks.append(
+                asyncio.create_task(
+                    _run_consumer_forever(
+                        PrHeadTrackerConsumer(
+                            pr_head_tracker_kafka_consumer, pr_head_tracker
+                        ),
+                        shutdown_event,
+                        name="pr-head-tracker",
+                    )
+                )
+            )
         tasks.append(
             asyncio.create_task(
                 _run_consumer_forever(review_consumer, shutdown_event, name="review")
@@ -401,6 +427,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pass
         if kafka_consumer is not None:
             await kafka_consumer.stop()
+        if pr_head_tracker_kafka_consumer is not None:
+            await pr_head_tracker_kafka_consumer.stop()
         if comment_answer_kafka_consumer is not None:
             await comment_answer_kafka_consumer.stop()
         if review_feedback_kafka_consumer is not None:

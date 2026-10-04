@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # 위해 기본값은 true다.
     review_consumer_enabled: bool = True
     comment_answer_consumer_enabled: bool = True
+    # 같은 PR에 더 새로운 head의 리뷰 요청이 이미 큐에 있으면 오래된 요청은 LLM을 돌리지
+    # 않고 건너뛴다. 도착 순서를 기록하는 수신 전용 컨슈머를 함께 띄운다.
+    review_skip_superseded_enabled: bool = True
     kafka_sandbox_probe_request_topic: str = "pr.sandbox.probe.requested"
     kafka_sandbox_probe_completed_topic: str = "pr.sandbox.probe.completed"
     # 기본 False: 샌드박스 프로브는 신뢰할 수 없는 PR 코드를 실제로 실행하므로 Docker가 있는

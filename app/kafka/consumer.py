@@ -28,6 +28,10 @@ class MessageSource(Protocol):
     async def commit(self) -> None: ...
 
 
+class SupersededChecker(Protocol):
+    async def is_superseded(self, event: ReviewRequestedEvent) -> bool: ...
+
+
 class ReviewRequestConsumer:
     """pr.review.requested 이벤트를 소비해 리뷰 파이프라인을 실행하고 결과를 발행한다.
 
@@ -42,12 +46,14 @@ class ReviewRequestConsumer:
         producer: EventPublisher,
         dedup: DedupStore,
         evaluation_repository: EvaluationRepository | None = None,
+        superseded: SupersededChecker | None = None,
     ) -> None:
         self._source = source
         self._pipeline = pipeline
         self._producer = producer
         self._dedup = dedup
         self._evaluation_repository = evaluation_repository
+        self._superseded = superseded
 
     async def run(self, shutdown: asyncio.Event | None = None) -> None:
         """shutdown이 주어지면, 처리 중이던 메시지를 커밋까지 마친 뒤 다음 메시지를
@@ -63,6 +69,13 @@ class ReviewRequestConsumer:
             event = ReviewRequestedEvent.model_validate_json(raw)
         except ValidationError:
             logger.exception("invalid ReviewRequestedEvent payload, skipping")
+            return
+
+        if self._superseded is not None and await self._superseded.is_superseded(event):
+            logger.info(
+                "skipping superseded review reviewJobId=%s: newer head already requested",
+                event.review_job_id,
+            )
             return
 
         if not await self._dedup.try_start(event.review_job_id):
