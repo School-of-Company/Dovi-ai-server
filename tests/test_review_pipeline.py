@@ -399,10 +399,13 @@ async def test_run_truncates_huge_single_new_file_diff() -> None:
     result = await _pipeline(fake).run(event)
 
     assert isinstance(result, ReviewCompletedEvent)
-    assert fake.received is not None
-    user_message = fake.received[1]["content"]
-    assert len(user_message) < len(huge_patch)
-    assert "...(truncated)" in user_message
+    prompts = [call[0][1]["content"] for call in fake.generate_calls]
+    assert all(len(prompt) < len(huge_patch) for prompt in prompts)
+    assert all("...(truncated)" not in prompt for prompt in prompts)
+    # 큰 파일은 잘리지 않고 조각으로 나뉘어 모든 줄이 어느 배치에선가 리뷰된다.
+    assert "+line 0\n" in prompts[0]
+    assert any("+line 1999" in prompt for prompt in prompts)
+    assert "일부만 리뷰된 파일" not in result.summary
 
 
 async def test_run_includes_all_files_across_batches_instead_of_dropping_them() -> None:
@@ -463,13 +466,13 @@ async def test_run_shares_diff_budget_with_project_context() -> None:
 
     await _pipeline(fake).run(event)
 
-    assert fake.received is not None
-    user_message = fake.received[1]["content"]
-    # 헤더 라벨("## Project Context"/"## Changes")과 잘림 마커 정도의 여유만 두고,
+    # 헤더 라벨("## Project Context"/"## Changes") 정도의 여유만 두고, 첫 배치의
     # context+diff 합계가 대략 20000자 안쪽이어야 한다 (context 혼자 20000, diff
     # 혼자 20000까지 각각 허용되던 예전 동작이었다면 최대 40000까지 나갔을 것).
-    assert len(user_message) < 20500
-    assert "...(truncated)" in user_message
+    first_message = fake.generate_calls[0][0][1]["content"]
+    assert len(first_message) < 20500
+    assert "+line 0\n" in first_message
+    assert all(len(call[0][1]["content"]) < 20500 for call in fake.generate_calls)
 
 
 async def test_run_includes_related_project_code_from_retriever() -> None:
@@ -1050,12 +1053,9 @@ async def test_run_shares_diff_budget_with_official_docs_context() -> None:
 
     await pipeline.run(event)
 
-    assert fake_llm.received is not None
-    user_message = fake_llm.received[1]["content"]
-    assert "...(truncated)" in user_message
     # evidence(15000자 남짓) + diff 합계가 20000자 예산 안쪽이어야 한다.
     # 예산에서 빼지 않던 예전 동작이라면 diff만으로 20000자를 채워 35000자가 됐다.
-    assert len(user_message) < 20500
+    assert all(len(call[0][1]["content"]) < 20500 for call in fake_llm.generate_calls)
 
 
 async def test_run_continues_when_official_docs_workflow_raises() -> None:
@@ -1689,7 +1689,7 @@ async def test_split_targets_into_batches_splits_when_files_exceed_budget() -> N
     assert all_files == {"a.py", "b.py", "c.py"}
 
 
-async def test_split_targets_into_batches_keeps_oversized_single_file_in_its_own_batch() -> None:
+async def test_split_targets_into_batches_splits_oversized_single_file_into_pieces() -> None:
     huge_patch = "@@ -0,0 +1,3000 @@\n" + "\n".join(f"+line {i}" for i in range(3000))
     event = ReviewRequestedEvent(
         review_job_id=make_review_job_id(42, 7, "abc123"),
@@ -1707,8 +1707,8 @@ async def test_split_targets_into_batches_keeps_oversized_single_file_in_its_own
     batches, omitted = await pipeline._split_targets_into_batches(event, targets, {}, "", "")
 
     assert omitted == []
-    assert len(batches) == 1
-    assert batches[0][0].file_path == "huge.py"
+    assert len(batches) > 1
+    assert all(t.file_path == "huge.py" for batch in batches for t in batch)
 
 
 async def test_split_targets_into_batches_caps_at_max_review_batches() -> None:

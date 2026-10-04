@@ -21,6 +21,7 @@ from app.rag.schema import ChunkSearchResult
 from app.review.context import build_context, extract_notion_api_spec_link, has_openapi_spec
 from app.review.diff import analyze
 from app.review.diff_lines import LineCheckRecord, annotate_hunk, classify_finding_lines
+from app.review.hunk_split import split_oversized_target
 from app.review.result_filter import filter_reviews, summarize_minor
 from app.review.schema import (
     ChangedFile,
@@ -590,6 +591,7 @@ class ReviewPipeline:
         # 배치별 결과: (LLM 출력, 실제로 쓰인 messages, 그 배치가 다룬 파일들).
         successful: list[tuple[ReviewModelOutput, list[ChatMessage], list[str]]] = []
         partial_files: list[str] = []
+        reviewed_files: set[str] = set()
         # parse_error/server_error는 배치마다 1회 재시도 후 실패 처리. timeout은
         # 즉시 실패(재시도가 SLA를 더 악화시키므로 재시도하지 않는다) — 오늘과
         # 동일한 규칙을 _generate_batch()가 배치 하나마다 적용한다.
@@ -650,6 +652,11 @@ class ReviewPipeline:
                 # 모델 문장에 기대지 않고 우리가 직접 사용자에게 안내한다(이슈 #124).
                 omitted_files.extend(report.dropped_files)
                 partial_files.extend(report.truncated_files)
+                reviewed_files.update(
+                    t.file_path
+                    for t in batch_targets
+                    if t.file_path not in report.dropped_files
+                )
 
         if not successful:
             logger.warning(
@@ -681,7 +688,10 @@ class ReviewPipeline:
         if len(successful) > 1:
             combined_summary = await self._reduce_summary(event, successful, combined_summary)
         notes: list[str] = []
-        omitted_files = list(dict.fromkeys(omitted_files))
+        # 큰 파일은 조각으로 나뉘어 일부 조각만 리뷰됐을 수 있다 — 그런 파일은
+        # "리뷰하지 못한 파일"이 아니라 "일부만 리뷰된 파일"로 안내한다.
+        partial_files.extend(p for p in omitted_files if p in reviewed_files)
+        omitted_files = [p for p in dict.fromkeys(omitted_files) if p not in reviewed_files]
         partial_files = [p for p in dict.fromkeys(partial_files) if p not in omitted_files]
         if omitted_files:
             notes.append(
@@ -1392,12 +1402,26 @@ class ReviewPipeline:
         # 빠진다(이슈 #124). 글자 상한도 함께 보고 배치를 나눈다.
         char_budget_first = max(0, _MAX_DIFF_TOTAL_CHARS - shared_chars_first)
         char_budget_rest = max(0, _MAX_DIFF_TOTAL_CHARS - shared_chars_rest)
-        target_tokens: dict[str, int] = {}
-        target_chars: dict[str, int] = {}
+        # 파일 하나가 글자 상한을 넘으면 뒷부분이 잘려 리뷰되지 않으므로(이슈 #135),
+        # hunk 단위로 쪼개 조각마다 별도 배치 단위로 담는다.
+        # 첫 배치는 PR 본문·프로젝트 컨텍스트가 글자 예산을 나눠 쓰므로, 조각이 그보다
+        # 커서 첫 배치에서 잘리지 않게 조각 크기를 맞춘다(너무 작아지지 않게 하한).
+        piece_chars = min(_MAX_DIFF_FILE_CHARS, max(char_budget_first, 3000))
+        pieces: list[ReviewTarget] = []
+        for t in targets:
+            related = related_context.get(t.file_path, [])
+
+            def size_of(candidate: ReviewTarget, related: list[ChunkSearchResult] = related) -> int:
+                return len(self._render_target(candidate, related))
+
+            pieces.extend(split_oversized_target(t, size_of, piece_chars))
+        targets = pieces
+        target_tokens: dict[int, int] = {}
+        target_chars: dict[int, int] = {}
         for t in targets:
             rendered = self._render_target(t, related_context.get(t.file_path, []))
-            target_tokens[t.file_path] = await self._count_tokens(rendered)
-            target_chars[t.file_path] = min(len(rendered), _MAX_DIFF_FILE_CHARS)
+            target_tokens[id(t)] = await self._count_tokens(rendered)
+            target_chars[id(t)] = min(len(rendered), _MAX_DIFF_FILE_CHARS)
 
         def pack(ordered: list[ReviewTarget]) -> list[list[ReviewTarget]]:
             packed: list[list[ReviewTarget]] = []
@@ -1406,8 +1430,8 @@ class ReviewPipeline:
             current_chars = 0
             char_budget = char_budget_first
             for target in ordered:
-                tokens = target_tokens[target.file_path]
-                chars = target_chars[target.file_path]
+                tokens = target_tokens[id(target)]
+                chars = target_chars[id(target)]
                 if current and (
                     current_tokens + tokens > budget or current_chars + chars > char_budget
                 ):
